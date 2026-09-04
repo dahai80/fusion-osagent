@@ -22,8 +22,10 @@ from os_agent.adapters.browser import BrowserAdapter, StubBrowserAdapter
 from os_agent.adapters.executor import ExecutorAdapter, StubExecutorAdapter
 from os_agent.adapters.mlx import MlxAdapter, StubMlxAdapter
 from os_agent.config import OsaConfig
+from os_agent.crop_zoom import CropResult, CropZoomer
 from os_agent.healer import Healer
 from os_agent.perception import Perception
+from os_agent.reasoning import Reason, Reasoner
 from os_agent.som import SomAnnotator, SomView
 
 log = get_logger("os_agent.api")
@@ -60,6 +62,8 @@ class DesktopAgent:
         self.som = SomAnnotator(self.cfg)
         self.asserter = FrameAsserter(self.cfg, self.mlx)
         self.healer = Healer(self.cfg, self.perception)
+        self.reasoner = Reasoner(self.cfg, self.mlx, self.som)
+        self.crop_zoomer = CropZoomer(self.cfg)
         log.info("DesktopAgent ready stub=%s mlx=%s", self.cfg.stub_mode, self.mlx.model)
 
     async def screenshot(self) -> Screenshot:
@@ -114,6 +118,17 @@ class DesktopAgent:
             error=fa.error,
             meta={"changed_ratio": fa.changed_ratio, "expected": expected, **fa.meta},
         )
+
+    async def decide(self, query: str, history: list[dict] | None = None) -> Reason:
+        """Fast/Slow dual-core: Fast proposes one action; escalate to Slow on low confidence / unknown dialog / failed assert."""
+        shot = await self.perception.capture(prefer_ax=True)
+        reason = await self.reasoner.decide(query, shot, history)
+        log.info("decide: core=%s action=%s conf=%.2f escalated=%s", reason.core, reason.action, reason.confidence, reason.escalated)
+        return reason
+
+    def crop_zoom(self, shot: Screenshot, center_px: tuple[float, float], half_extent_px: int = 120, upscale: int = 2) -> CropResult | None:
+        """Patch-level crop & zoom for finer VLM grounding on dense/small controls (Phase 2.3)."""
+        return self.crop_zoomer.crop_around(shot, center_px, half_extent_px=half_extent_px, upscale=upscale)
 
     async def heal(self, query: str) -> ActionResult:
         """Multi-locator self-healing: AX-label → AX-role → SOM → visual."""

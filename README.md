@@ -41,6 +41,14 @@ extends it with `assert` / `heal` / `som_view` / `replay`.
 - `os_agent/adapters/agent_studio.py` — HTTP to `fusion-agent-studio`.
 - `os_agent/perception.py` — dual-track locate (AX search → visual grounding).
 - `os_agent/api.py` — `DesktopAgent`, the single entry point.
+- `os_agent/som.py` — Set-of-Mark annotation (AX-boundary, numbered marks).
+- `os_agent/action.py` — post-action frame assertion (pixel diff + VLM verify).
+- `os_agent/healer.py` — multi-locator self-healing (ax-label → ax-role → visual).
+- `os_agent/planner.py` — FSM planner + State Guard.
+- `os_agent/mask.py` — sensitive-region masking before VLM.
+- `os_agent/reasoning.py` — Fast/Slow dual-core scheduler (Phase 2.1).
+- `os_agent/trajectory.py` — human-like Bezier mouse path + key jitter (Phase 2.2).
+- `os_agent/crop_zoom.py` — patch-level crop & zoom for fine grounding (Phase 2.3).
 - `os_agent/cli.py` — `fusion-osagent` CLI (preflight / screenshot / click / health).
 
 ## Sibling reuse (no rebuild)
@@ -139,7 +147,7 @@ query (issue E1); until then it defaults to `2.0`.
 |-------|------|--------|
 | **0** | skeleton + stub adapters, dual-track perception, ruff/pytest green | ✅ done |
 | **1** | SOM overlay, frame assertion, self-healing, FSM planner, sensitive masking, real VL E2E | ✅ done |
-| **2** | Fast/Slow dual-core reasoning, software-engineering loop (fusion-code) | planned |
+| **2** | Fast/Slow dual-core reasoning, Bezier trajectory, crop/zoom, software-engineering loop (fusion-code) | 🚧 in progress |
 | **3** | record/replay, sensitive masking, human-like trajectories | planned |
 
 Phase 0 acceptance: stub `api.screenshot()` + `api.click(x,y)` exercise the

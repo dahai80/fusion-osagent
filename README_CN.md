@@ -39,6 +39,14 @@ API 对齐 Claude Computer Use 的 `computer` 工具
 - `os_agent/adapters/agent_studio.py` —— 经 HTTP 连接 `fusion-agent-studio`。
 - `os_agent/perception.py` —— 双轨定位（AX 搜索 → 视觉定位）。
 - `os_agent/api.py` —— `DesktopAgent`，唯一入口。
+- `os_agent/som.py` —— Set-of-Mark 标注（AX 边界、编号标记）。
+- `os_agent/action.py` —— 动作后帧断言（像素差分 + VLM 校验）。
+- `os_agent/healer.py` —— 多定位自愈（ax-label → ax-role → 视觉）。
+- `os_agent/planner.py` —— FSM 规划器 + State Guard。
+- `os_agent/mask.py` —— 推理前敏感区域打码。
+- `os_agent/reasoning.py` —— 快/慢双核调度（Phase 2.1）。
+- `os_agent/trajectory.py` —— 类人 Bezier 鼠标轨迹 + 按键抖动（Phase 2.2）。
+- `os_agent/crop_zoom.py` —— Patch 级裁剪放大，精细定位（Phase 2.3）。
 - `os_agent/cli.py` —— `fusion-osagent` CLI（preflight / screenshot / click / health）。
 
 ## 同源复用（不重建）
@@ -137,7 +145,7 @@ pixels_to_points(200.0, 400.0, 2.0)   # (100.0, 200.0)
 |------|------|------|
 | **0** | 骨架 + stub 适配器、双轨感知、ruff/pytest 绿 | ✅ 完成 |
 | **1** | SOM 叠加、帧断言、自愈、FSM 规划器、敏感打码、真实 VL 端到端 | ✅ 完成 |
-| **2** | 快/慢双核推理、软件工程闭环（fusion-code） | 计划中 |
+| **2** | 快/慢双核推理、Bezier 轨迹、crop/zoom、软件工程闭环（fusion-code） | 🚧 进行中 |
 | **3** | 录制/回放、敏感遮罩、类人轨迹 | 计划中 |
 
 Phase 0 验收：stub `api.screenshot()` + `api.click(x,y)` 走通双轨调度；

@@ -95,6 +95,7 @@ class OsaConfig:
     step_latency_target_ms: int = field(default_factory=lambda: _env_int("OSA_LATENCY_TARGET_MS", 150))
     stub_mode: bool = field(default_factory=lambda: _env_bool("OSA_STUB_MODE", False))
     dual_track_arbitrate: bool = field(default_factory=lambda: _env_bool("OSA_DUAL_TRACK_ARBITRATE", True))
+    fast_confidence_floor: float = field(default_factory=lambda: _env_float("OSA_FAST_CONF_FLOOR", 0.5))
 
 
 def points_to_pixels(x: float, y: float, scale: float) -> tuple[float, float]:
