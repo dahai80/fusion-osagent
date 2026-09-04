@@ -49,6 +49,8 @@ extends it with `assert` / `heal` / `som_view` / `replay`.
 - `os_agent/reasoning.py` — Fast/Slow dual-core scheduler (Phase 2.1).
 - `os_agent/trajectory.py` — human-like Bezier mouse path + key jitter (Phase 2.2).
 - `os_agent/crop_zoom.py` — patch-level crop & zoom for fine grounding (Phase 2.3).
+- `os_agent/loops/code_debug.py` — fusion-code visual-debug loop: patch → verify → feedback (F5.2).
+- `os_agent/loops/autotest.py` — fusion-autotest acceptance loop: osagent executes, autotest asserts (F5.3).
 - `os_agent/cli.py` — `fusion-osagent` CLI (preflight / screenshot / click / health).
 
 ## Sibling reuse (no rebuild)
@@ -147,8 +149,8 @@ query (issue E1); until then it defaults to `2.0`.
 |-------|------|--------|
 | **0** | skeleton + stub adapters, dual-track perception, ruff/pytest green | ✅ done |
 | **1** | SOM overlay, frame assertion, self-healing, FSM planner, sensitive masking, real VL E2E | ✅ done |
-| **2** | Fast/Slow dual-core reasoning, Bezier trajectory, crop/zoom, software-engineering loop (fusion-code) | 🚧 in progress |
-| **3** | record/replay, sensitive masking, human-like trajectories | planned |
+| **2** | Fast/Slow dual-core reasoning, Bezier trajectory, crop/zoom, code-debug + autotest loops | ✅ done |
+| **3** | record/replay, human-like trajectory execution, sensitive masking integration | planned |
 
 Phase 0 acceptance: stub `api.screenshot()` + `api.click(x,y)` exercise the
 dual-track dispatch; `ruff check .` and `pytest tests/` are green. ✅
@@ -159,6 +161,8 @@ Hard-blocking gaps filed as issues (do not patch sibling repos here):
 
 - **E1** — `fusion-executor`: expose `scale_factor` / capability query.
 - **B2** — `fusion-browser`: provide a Python client for the UDS JSON-RPC API.
+- **C1** — `fusion-code`: stable visual-feedback protocol (osagent emits JSON; code consumes to auto-fix). Until then `code_debug` writes a local report + optional `--visual-feedback` CLI hook.
+- **AT1** — `fusion-autotest`: single-requirement VLM assertion mode (today `vlm` asserts the full PRD; osagent parses `vlm_result.json` defects).
 
 ## License
 

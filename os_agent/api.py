@@ -24,6 +24,8 @@ from os_agent.adapters.mlx import MlxAdapter, StubMlxAdapter
 from os_agent.config import OsaConfig
 from os_agent.crop_zoom import CropResult, CropZoomer
 from os_agent.healer import Healer
+from os_agent.loops.autotest import AutotestLoop
+from os_agent.loops.code_debug import CodeDebugLoop
 from os_agent.perception import Perception
 from os_agent.reasoning import Reason, Reasoner
 from os_agent.som import SomAnnotator, SomView
@@ -64,6 +66,8 @@ class DesktopAgent:
         self.healer = Healer(self.cfg, self.perception)
         self.reasoner = Reasoner(self.cfg, self.mlx, self.som)
         self.crop_zoomer = CropZoomer(self.cfg)
+        self.code_debug = CodeDebugLoop(self.cfg, self)
+        self.autotest = AutotestLoop(self.cfg)
         log.info("DesktopAgent ready stub=%s mlx=%s", self.cfg.stub_mode, self.mlx.model)
 
     async def screenshot(self) -> Screenshot:
