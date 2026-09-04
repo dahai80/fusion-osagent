@@ -25,8 +25,10 @@ log = get_logger("os_agent.perception")
 
 GROUNDING_PROMPT = (
     "You are a GUI grounding model. Given this screenshot, find the element matching: "
-    "{query}. Return ONLY JSON: {{\"x\": <0-1 normalized>, \"y\": <0-1 normalized>, "
-    "\"confidence\": <0-1>, \"label\": \"<text>\"}}. x,y are normalized to image width/height."
+    "{query}. Return ONLY JSON: {{\"x\": <float 0.0-1.0>, \"y\": <float 0.0-1.0>, "
+    "\"confidence\": <float 0.0-1.0>, \"label\": \"<text>\"}}. "
+    "x and y MUST be normalized fractions of image width/height (0.0=top-left, 1.0=bottom-right). "
+    "NEVER return pixel counts. Example: center of a 800x600 image is x=0.5, y=0.5."
 )
 
 VISUAL_FALLBACK_HINTS = ("webgl", "canvas", "electron", "custom-draw", "no-ax", "ax-empty")
@@ -127,12 +129,20 @@ class Perception:
         nx = float(data.get("x", 0.0))
         ny = float(data.get("y", 0.0))
         conf = float(data.get("confidence", 0.0))
+        # VLM output is non-deterministic: may return normalized (0-1) OR raw pixels.
+        # Normalize to points in the API's logical-point space.
         if shot.width and shot.height:
-            x = nx * shot.width / self.cfg.scale_factor
-            y = ny * shot.height / self.cfg.scale_factor
+            if 0.0 <= nx <= 1.0 and 0.0 <= ny <= 1.0:
+                x = nx * shot.width / self.cfg.scale_factor
+                y = ny * shot.height / self.cfg.scale_factor
+            else:
+                # raw physical pixels -> logical points
+                x = nx / self.cfg.scale_factor
+                y = ny / self.cfg.scale_factor
+                log.warning("visual locate: VLM returned raw pixels (not normalized); converting")
         else:
             x, y = nx, ny
-        log.info("visual locate: query=%r norm=(%.3f,%.3f) point=(%.1f,%.1f) conf=%.2f", query, nx, ny, x, y, conf)
+        log.info("visual locate: query=%r raw=(%.3f,%.3f) point=(%.1f,%.1f) conf=%.2f", query, nx, ny, x, y, conf)
         return Locator(kind="visual", x=x, y=y, visual_query=query, raw={"confidence": conf, "label": data.get("label")})
 
 
