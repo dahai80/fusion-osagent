@@ -1,0 +1,156 @@
+# fusion-osagent
+
+> Desktop Embodied AI — pixel-level OS Agent barrier layer for Apple Silicon.
+
+`fusion-osagent` is the desktop-embodied counterpart to `fusion-robot`: where
+`fusion-robot` drives voxel-level physical robotics, `fusion-osagent` drives
+pixel-level desktop GUI automation. It reuses sibling fusion packages as
+primitives rather than rebuilding them, adding the five barrier layers that
+turn raw GUI access into a reliable agent:
+
+1. **AX + visual dual-track perception** — AXUI tree first, visual grounding fallback.
+2. **Set-of-Mark (SOM) annotation** — overlay numbered marks on screenshot + AX tree.
+3. **Fast / Slow dual-core reasoning** — small VL model proposes, large VL model verifies/plans.
+4. **Post-action frame assertion + self-healing** — assert state changed, re-locate on miss.
+5. **Human-like trajectories** — Bezier mouse paths, sensitive-region masking, record/replay.
+
+The API aligns with the Claude Computer Use `computer` tool
+(`screenshot` / `click` / `type` / `key` / `scroll` / `drag` / `wait`) and
+extends it with `assert` / `heal` / `som_view` / `replay`.
+
+## Architecture
+
+```
+                   DesktopAgent  (os_agent.api)
+                        |
+              Perception (os_agent.perception)
+              /         |          \
+   ExecutorAdapter  MlxAdapter  BrowserAdapter   AgentStudioAdapter
+        |              |              |                 |
+  fusion-executor  fusion-mlx   fusion-browser    fusion-agent-studio
+  (AXUI/CGEvent)   (inference)  (Web AXTree/CDP)  (orchestration)
+        |
+  fusion-core (HTTP/LLM client, config, logging)
+```
+
+- `os_agent/config.py` — env-driven `OsaConfig`, point↔pixel conversion.
+- `os_agent/adapters/base.py` — `Locator`, `Screenshot`, `Adapter` protocol.
+- `os_agent/adapters/executor.py` — wraps `fusion-executor` `gui_action` (18 GuiAction kinds).
+- `os_agent/adapters/mlx.py` — wraps `fusion-mlx` multimodal chat.
+- `os_agent/adapters/browser.py` — UDS JSON-RPC to `fusion-browser`.
+- `os_agent/adapters/agent_studio.py` — HTTP to `fusion-agent-studio`.
+- `os_agent/perception.py` — dual-track locate (AX search → visual grounding).
+- `os_agent/api.py` — `DesktopAgent`, the single entry point.
+- `os_agent/cli.py` — `fusion-osagent` CLI (preflight / screenshot / click / health).
+
+## Sibling reuse (no rebuild)
+
+| Sibling | Role | Contract |
+|---------|------|----------|
+| `fusion-core` | HTTP/LLM client, config, logging | `get_async_client`, `get_logger` |
+| `fusion-executor` | GUI actuation | `FusionSandboxExecutor.gui_action(dict) -> GuiResult`, 18 kinds |
+| `fusion-mlx` | VL inference | `FusionMLXClient` at `localhost:11434` |
+| `fusion-browser` | Web page AX tree + CDP | UDS JSON-RPC (no Python client yet) |
+| `fusion-agent-studio` | orchestration | HTTP API, 37 built-in tools / 11 NodeType |
+| `fusion-autotest` | assertions | post-action frame assertion (Phase 1) |
+| `fusion-code` | coding loop | visual debug for software-engineering tasks (Phase 2) |
+
+Gaps in sibling APIs are filed as upstream issues, not patched here
+(see `architecture/fusion-osagent-prd-0904.md`).
+
+## Install
+
+```bash
+cd /Users/dahai/fusion
+source .venv/bin/activate
+pip install -e fusion-osagent         # runtime
+pip install -e "fusion-osagent[test]" # with test extras
+```
+
+## Usage
+
+```bash
+# offline software self-check (no live siblings)
+fusion-osagent preflight
+
+# capture one frame (stub mode writes a 1x1 placeholder)
+fusion-osagent --stub screenshot --out frame.png
+fusion-osagent screenshot --out frame.png   # real mode needs fusion-executor
+
+# click at logical point (x, y)
+fusion-osagent --stub click 100 200
+
+# ping fusion-mlx
+fusion-osagent --stub health
+```
+
+Programmatic:
+
+```python
+import asyncio
+from os_agent.api import DesktopAgent
+from os_agent.config import OsaConfig
+
+async def main():
+    agent = DesktopAgent(OsaConfig(stub_mode=True))   # real mode: stub_mode=False
+    shot = await agent.screenshot()
+    await agent.click(100.0, 200.0)
+    res = await agent.click_by("OK")        # dual-track: AX first, visual fallback
+    await agent.type_text("hello")
+    await agent.key("Return", modifiers=["command"])
+    await agent.close()
+
+asyncio.run(main())
+```
+
+## Tests
+
+```bash
+pytest tests/ -v          # all unit/stub tests
+pytest tests/test_api.py::test_click_logs_and_returns_ok -v   # single test
+ruff check .              # lint
+ruff format .             # format
+```
+
+- `asyncio_mode=auto`, `testpaths=["tests"]`.
+- Default tests run fully offline against in-process stub adapters
+  (`OSA_STUB_MODE=1` / `OsaConfig(stub_mode=True)`).
+- Marker `integration` gates tests that need live siblings:
+  `pytest -m integration` (requires fusion-mlx / fusion-executor running).
+
+## Coordinate space
+
+The API exposes a **single logical-point space** (Apple "points").
+Adapters convert to physical pixels via `scale_factor` (default `2.0` Retina).
+
+```python
+from os_agent.config import points_to_pixels, pixels_to_points
+points_to_pixels(100.0, 200.0, 2.0)   # (200.0, 400.0)
+pixels_to_points(200.0, 400.0, 2.0)   # (100.0, 200.0)
+```
+
+`scale_factor` auto-detection is pending an upstream executor capability
+query (issue E1); until then it defaults to `2.0`.
+
+## Roadmap / Phases
+
+| Phase | Goal | Status |
+|-------|------|--------|
+| **0** | skeleton + stub adapters, dual-track perception, ruff/pytest green | ✅ done |
+| **1** | real-env integration, SOM overlay, frame assertion + healing | planned |
+| **2** | Fast/Slow dual-core reasoning, software-engineering loop (fusion-code) | planned |
+| **3** | record/replay, sensitive masking, human-like trajectories | planned |
+
+Phase 0 acceptance: stub `api.screenshot()` + `api.click(x,y)` exercise the
+dual-track dispatch; `ruff check .` and `pytest tests/` are green. ✅
+
+## Upstream dependencies
+
+Hard-blocking gaps filed as issues (do not patch sibling repos here):
+
+- **E1** — `fusion-executor`: expose `scale_factor` / capability query.
+- **B2** — `fusion-browser`: provide a Python client for the UDS JSON-RPC API.
+
+## License
+
+Part of the Fusion local-first Apple Silicon ecosystem. See repository root.

@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Test / lint caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# venv (root-level, never commit)
+.venv/
+
+# Claude / runtime
+.claude/
+.remember/
+
+# Local artifacts
+*.png
+osa_screenshot.png
