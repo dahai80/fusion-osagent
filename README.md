@@ -116,7 +116,8 @@ ruff format .             # format
 - Default tests run fully offline against in-process stub adapters
   (`OSA_STUB_MODE=1` / `OsaConfig(stub_mode=True)`).
 - Marker `integration` gates tests that need live siblings:
-  `pytest -m integration` (requires fusion-mlx / fusion-executor running).
+  `OSA_RUN_INTEGRATION=1 pytest -m integration` (requires fusion-mlx with a
+  VL model loaded, e.g. `mlx-community/Qwen2.5-VL-7B-Instruct-4bit`).
 
 ## Coordinate space
 
@@ -137,7 +138,7 @@ query (issue E1); until then it defaults to `2.0`.
 | Phase | Goal | Status |
 |-------|------|--------|
 | **0** | skeleton + stub adapters, dual-track perception, ruff/pytest green | ✅ done |
-| **1** | real-env integration, SOM overlay, frame assertion + healing | planned |
+| **1** | SOM overlay, frame assertion, self-healing, FSM planner, sensitive masking, real VL E2E | ✅ done |
 | **2** | Fast/Slow dual-core reasoning, software-engineering loop (fusion-code) | planned |
 | **3** | record/replay, sensitive masking, human-like trajectories | planned |
 

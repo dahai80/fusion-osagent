@@ -44,13 +44,30 @@ def _env_bool(key: str, default: bool) -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _resolve_mlx_api_key() -> str:
+    raw = os.environ.get("FUSION_MLX_API_KEY")
+    if raw:
+        return raw
+    settings = os.path.join(os.path.expanduser("~"), ".fusion-mlx", "settings.json")
+    try:
+        import json
+
+        d = json.load(open(settings))
+        key = d.get("auth", {}).get("api_key", "")
+        if key:
+            return key
+    except Exception:
+        pass
+    return ""
+
+
 @dataclass
 class OsaConfig:
     fusion_mlx_url: str = field(
-        default_factory=lambda: os.environ.get("FUSION_MLX_URL", "http://localhost:11434")
+        default_factory=lambda: os.environ.get("FUSION_MLX_URL", "http://localhost:11434/v1")
     )
     fusion_mlx_api_key: str = field(
-        default_factory=lambda: os.environ.get("FUSION_MLX_API_KEY", "dahai168")
+        default_factory=_resolve_mlx_api_key
     )
     fast_model: str = field(
         default_factory=lambda: os.environ.get(

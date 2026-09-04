@@ -126,11 +126,11 @@ class ExecutorAdapter:
 class StubExecutorAdapter:
     name = "executor-stub"
 
-    def __init__(self, cfg: OsaConfig) -> None:
+    def __init__(self, cfg: OsaConfig, tree: str | None = None) -> None:
         self.cfg = cfg
         self.calls: list[dict] = []
         self._shot = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
-        self._tree = '{"role":"AXWindow","children":[{"role":"AXButton","label":"OK","frame":[0,0,40,20]}]}'
+        self._tree = tree or '{"role":"AXWindow","children":[{"role":"AXButton","label":"OK","frame":[0,0,40,20]}]}'
         log.info("stub executor ready")
 
     async def screenshot(self) -> Screenshot:

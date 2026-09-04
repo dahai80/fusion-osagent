@@ -15,13 +15,16 @@ from dataclasses import dataclass, field
 
 from fusion_core import get_logger
 
+from os_agent.action import FrameAsserter
 from os_agent.adapters.agent_studio import AgentStudioAdapter, StubAgentStudioAdapter
 from os_agent.adapters.base import Locator, Screenshot
 from os_agent.adapters.browser import BrowserAdapter, StubBrowserAdapter
 from os_agent.adapters.executor import ExecutorAdapter, StubExecutorAdapter
 from os_agent.adapters.mlx import MlxAdapter, StubMlxAdapter
 from os_agent.config import OsaConfig
+from os_agent.healer import Healer
 from os_agent.perception import Perception
+from os_agent.som import SomAnnotator, SomView
 
 log = get_logger("os_agent.api")
 
@@ -54,6 +57,9 @@ class DesktopAgent:
             StubAgentStudioAdapter(self.cfg) if self.cfg.stub_mode else AgentStudioAdapter(self.cfg)
         )
         self.perception = Perception(self.cfg, self.executor, self.mlx, self.browser)
+        self.som = SomAnnotator(self.cfg)
+        self.asserter = FrameAsserter(self.cfg, self.mlx)
+        self.healer = Healer(self.cfg, self.perception)
         log.info("DesktopAgent ready stub=%s mlx=%s", self.cfg.stub_mode, self.mlx.model)
 
     async def screenshot(self) -> Screenshot:
@@ -62,9 +68,10 @@ class DesktopAgent:
         log.info("screenshot track=%s ax=%s %dms", "ax" if shot.has_ax else "plain", shot.has_ax, int((time.monotonic() - t0) * 1000))
         return shot
 
-    async def som_view(self) -> Screenshot:
-        """Capture with AX tree for SOM overlay (Phase 1 adds overlay; Phase 0 returns raw)."""
-        return await self.perception.capture(prefer_ax=True)
+    async def som_view(self) -> SomView:
+        """Capture with AX tree and overlay numbered SOM marks (Phase 1)."""
+        shot = await self.perception.capture(prefer_ax=True)
+        return await self.som.annotate(shot)
 
     async def click(self, x: float, y: float, button: str = "left") -> ActionResult:
         return await self._act("click", Locator(kind="point", x=x, y=y), button=button)
@@ -94,15 +101,31 @@ class DesktopAgent:
     async def wait(self, seconds: float) -> ActionResult:
         return await self._act_raw("wait", lambda: self.executor.wait(seconds))
 
-    async def assert_changed(self, expected: str | None = None) -> ActionResult:
-        """Post-action frame assertion (Phase 1 full impl; Phase 0 captures before/after)."""
-        log.info("assert_changed stub: expected=%s (full impl Phase 1)", expected)
-        return ActionResult(ok=True, action="assert", meta={"phase": "stub", "expected": expected})
+    async def assert_changed(self, before: Screenshot | None = None, expected: str | None = None) -> ActionResult:
+        """Post-action frame assertion: diff before/after, optional VLM semantic verify."""
+        before = before or await self.perception.capture(prefer_ax=False)
+        after = await self.perception.capture(prefer_ax=False)
+        fa = await self.asserter.assert_changed(before, after, expected=expected)
+        log.info("assert_changed: ok=%s ratio=%.5f err=%s", fa.ok, fa.changed_ratio, fa.error)
+        return ActionResult(
+            ok=fa.ok,
+            action="assert",
+            latency_ms=0,
+            error=fa.error,
+            meta={"changed_ratio": fa.changed_ratio, "expected": expected, **fa.meta},
+        )
 
     async def heal(self, query: str) -> ActionResult:
-        """Multi-locator self-healing (Phase 1 full impl; Phase 0 re-locates)."""
-        pr = await self.perception.locate(query)
-        return ActionResult(ok=pr.locator.x is not None, action="heal", track=pr.track, meta={"phase": "stub", "query": query})
+        """Multi-locator self-healing: AX-label → AX-role → SOM → visual."""
+        hr = await self.healer.heal(query)
+        log.info("heal: ok=%s strategy=%s query=%r", hr.ok, hr.strategy, query)
+        return ActionResult(
+            ok=hr.ok,
+            action="heal",
+            track=hr.strategy,
+            error=hr.error,
+            meta={"query": query, "attempts": hr.attempts},
+        )
 
     async def close(self) -> None:
         await self.executor.close()

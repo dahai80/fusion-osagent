@@ -114,7 +114,8 @@ ruff format .             # 格式化
 - 默认测试完全离线，跑进程内 stub 适配器
   （`OSA_STUB_MODE=1` / `OsaConfig(stub_mode=True)`）。
 - 标记 `integration` 隔离需启动同源服务的用例：
-  `pytest -m integration`（需 fusion-mlx / fusion-executor 在跑）。
+  `OSA_RUN_INTEGRATION=1 pytest -m integration`（需 fusion-mlx 加载 VL 模型，
+  如 `mlx-community/Qwen2.5-VL-7B-Instruct-4bit`）。
 
 ## 坐标空间
 
@@ -135,7 +136,7 @@ pixels_to_points(200.0, 400.0, 2.0)   # (100.0, 200.0)
 | 阶段 | 目标 | 状态 |
 |------|------|------|
 | **0** | 骨架 + stub 适配器、双轨感知、ruff/pytest 绿 | ✅ 完成 |
-| **1** | 真实环境集成、SOM 叠加、帧断言 + 自愈 | 计划中 |
+| **1** | SOM 叠加、帧断言、自愈、FSM 规划器、敏感打码、真实 VL 端到端 | ✅ 完成 |
 | **2** | 快/慢双核推理、软件工程闭环（fusion-code） | 计划中 |
 | **3** | 录制/回放、敏感遮罩、类人轨迹 | 计划中 |
 
