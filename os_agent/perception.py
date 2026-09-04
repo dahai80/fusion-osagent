@@ -20,6 +20,7 @@ from os_agent.adapters.browser import BrowserAdapter, StubBrowserAdapter
 from os_agent.adapters.executor import ExecutorAdapter, StubExecutorAdapter
 from os_agent.adapters.mlx import MlxAdapter, StubMlxAdapter
 from os_agent.config import OsaConfig
+from os_agent.mask import SensitiveMasker
 
 log = get_logger("os_agent.perception")
 
@@ -59,6 +60,7 @@ class Perception:
         self.executor = executor
         self.mlx = mlx
         self.browser = browser
+        self.masker = SensitiveMasker()
 
     async def capture(self, prefer_ax: bool = True) -> Screenshot:
         if prefer_ax:
@@ -120,6 +122,7 @@ class Perception:
         if not shot.png_b64:
             log.error("no screenshot for visual locate")
             return Locator(kind="visual", x=0.0, y=0.0, visual_query=query, raw={"confidence": 0.0})
+        shot = self.masker.mask(shot)  # F3.5: never feed raw sensitive pixels to VLM
         prompt = GROUNDING_PROMPT.format(query=query)
         try:
             data = await self.mlx.chat_json(prompt, shot.png_b64)

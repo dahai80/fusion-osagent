@@ -51,6 +51,9 @@ extends it with `assert` / `heal` / `som_view` / `replay`.
 - `os_agent/crop_zoom.py` — patch-level crop & zoom for fine grounding (Phase 2.3).
 - `os_agent/loops/code_debug.py` — fusion-code visual-debug loop: patch → verify → feedback (F5.2).
 - `os_agent/loops/autotest.py` — fusion-autotest acceptance loop: osagent executes, autotest asserts (F5.3).
+- `os_agent/recorder.py` — GUI trajectory capture: events + screenshot context → structured Steps (F4.1).
+- `os_agent/translator.py` — fixed-coord Steps → natural-language script with Semantic Guards (F4.2).
+- `os_agent/replayer.py` — step-by-step replay through DesktopAgent with per-step frame assertion (F4.3).
 - `os_agent/cli.py` — `fusion-osagent` CLI (preflight / screenshot / click / health).
 
 ## Sibling reuse (no rebuild)
@@ -113,6 +116,33 @@ async def main():
 asyncio.run(main())
 ```
 
+Record → translate → replay (Phase 3):
+
+```python
+import asyncio
+from os_agent.api import DesktopAgent
+from os_agent.config import OsaConfig
+from os_agent.recorder import ManualEventSource, Recorder
+from os_agent.translator import Translator
+
+async def main():
+    agent = DesktopAgent(OsaConfig(stub_mode=True))
+    # record (manual source here; CGEventTapSource for real capture)
+    src = ManualEventSource([
+        {"kind": "click", "at": [100.0, 200.0], "button": "left"},
+        {"kind": "type", "text": "hello"},
+    ])
+    rec = Recorder(src, capture=lambda: None, clock=lambda: 0.0).record()
+    # generalize fixed coords -> semantic script
+    script = agent.translator.translate(rec)
+    # replay with per-step frame assertion + visual guards
+    report = await agent.replay(script)
+    assert report.ok
+    await agent.close()
+
+asyncio.run(main())
+```
+
 ## Tests
 
 ```bash
@@ -150,10 +180,15 @@ query (issue E1); until then it defaults to `2.0`.
 | **0** | skeleton + stub adapters, dual-track perception, ruff/pytest green | ✅ done |
 | **1** | SOM overlay, frame assertion, self-healing, FSM planner, sensitive masking, real VL E2E | ✅ done |
 | **2** | Fast/Slow dual-core reasoning, Bezier trajectory, crop/zoom, code-debug + autotest loops | ✅ done |
-| **3** | record/replay, human-like trajectory execution, sensitive masking integration | planned |
+| **3** | record/replay + generalization, human-like trajectory execution, sensitive-mask wiring | ✅ done |
 
 Phase 0 acceptance: stub `api.screenshot()` + `api.click(x,y)` exercise the
 dual-track dispatch; `ruff check .` and `pytest tests/` are green. ✅
+
+Phase 3 acceptance: record → translate → replay loop runs with per-step frame
+assertion; Semantic Guards re-locate by description instead of fixed coords;
+Bezier trajectory drives human-like clicks; sensitive regions are masked
+before every VLM call. ✅
 
 ## Upstream dependencies
 

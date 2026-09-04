@@ -16,6 +16,7 @@ from fusion_core import get_logger
 
 from os_agent.adapters.base import Screenshot
 from os_agent.config import OsaConfig
+from os_agent.mask import SensitiveMasker
 
 log = get_logger("os_agent.reasoning")
 
@@ -50,6 +51,7 @@ class Reasoner:
         self.cfg = cfg
         self.mlx = mlx
         self.som = som
+        self.masker = SensitiveMasker()
         self.fast_confidence_floor = cfg.fast_confidence_floor
 
     async def decide(self, query: str, shot: Screenshot, history: list[dict] | None = None) -> Reason:
@@ -78,7 +80,8 @@ class Reasoner:
             "Be decisive; routine clicks need no deliberation."
         )
         try:
-            data = await self.mlx.chat_json(prompt, shot.png_b64 or "", model=self.cfg.fast_model)
+            masked = self.masker.mask(shot)  # F3.5: redact sensitive regions before Fast VLM
+            data = await self.mlx.chat_json(prompt, masked.png_b64 or shot.png_b64 or "", model=self.cfg.fast_model)
         except Exception as e:
             log.error("fast propose failed: %s — force escalate", e)
             return FastProposal(action="none", target="", confidence=0.0, unknown_dialog=True)
@@ -90,7 +93,8 @@ class Reasoner:
         )
 
     async def _slow_plan(self, query: str, shot: Screenshot, history: list[dict]) -> Reason:
-        view = await self.som.annotate(shot)
+        masked = self.masker.mask(shot)  # F3.5: redact before SOM + Slow VLM
+        view = await self.som.annotate(masked)
         hist_blob = "; ".join(f'step={h.get("step")} action={h.get("action")} ok={h.get("action_ok")}' for h in history[-8:])
         prompt = (
             "You are a Slow GUI planner. The Fast core was uncertain or blocked. "

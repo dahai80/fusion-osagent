@@ -102,6 +102,21 @@ class ExecutorAdapter:
         x2, y2 = self._to_pixel(dst)
         return self._run({"kind": KIND_DRAG, "from": [x1, y1], "to": [x2, y2]})
 
+    async def move_path(self, points: list[tuple[float, float]]) -> dict:
+        """Step through Bezier waypoints via per-point hover (F3.1 execution).
+
+        Pending upstream E2 (batch-move), this is N round-trips; the path is
+        human-like regardless. Returns last result; ok=False if any step fails.
+        """
+        last = {"ok": True, "error": None, "kind": "move_path"}
+        for pt in points:
+            x, y = points_to_pixels(pt[0], pt[1], self.cfg.scale_factor)
+            last = self._run({"kind": KIND_HOVER, "at": [x, y]})
+            if not last.get("ok"):
+                log.warning("move_path stopped at %s: %s", pt, last.get("error"))
+                return last
+        return last
+
     async def wait(self, seconds: float) -> dict:
         return self._run({"kind": KIND_WAIT, "seconds": seconds})
 
@@ -165,6 +180,12 @@ class StubExecutorAdapter:
         x2, y2 = points_to_pixels(*dst.as_point(), self.cfg.scale_factor)
         self.calls.append({"kind": KIND_DRAG, "from": [x1, y1], "to": [x2, y2]})
         return {"ok": True, "error": None, "kind": KIND_DRAG}
+
+    async def move_path(self, points: list[tuple[float, float]]) -> dict:
+        for pt in points:
+            x, y = points_to_pixels(pt[0], pt[1], self.cfg.scale_factor)
+            self.calls.append({"kind": KIND_HOVER, "at": [x, y]})
+        return {"ok": True, "error": None, "kind": "move_path"}
 
     async def wait(self, seconds: float) -> dict:
         self.calls.append({"kind": KIND_WAIT, "seconds": seconds})

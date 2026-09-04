@@ -96,6 +96,7 @@ class OsaConfig:
     stub_mode: bool = field(default_factory=lambda: _env_bool("OSA_STUB_MODE", False))
     dual_track_arbitrate: bool = field(default_factory=lambda: _env_bool("OSA_DUAL_TRACK_ARBITRATE", True))
     fast_confidence_floor: float = field(default_factory=lambda: _env_float("OSA_FAST_CONF_FLOOR", 0.5))
+    trajectory_seed: int | None = field(default_factory=lambda: _env_int("OSA_TRAJECTORY_SEED", 7) if os.environ.get("OSA_TRAJECTORY_SEED") else 7)
 
 
 def points_to_pixels(x: float, y: float, scale: float) -> tuple[float, float]:

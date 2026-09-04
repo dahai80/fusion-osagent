@@ -28,7 +28,11 @@ from os_agent.loops.autotest import AutotestLoop
 from os_agent.loops.code_debug import CodeDebugLoop
 from os_agent.perception import Perception
 from os_agent.reasoning import Reason, Reasoner
+from os_agent.recorder import Recording
+from os_agent.replayer import Replayer, ReplayReport
 from os_agent.som import SomAnnotator, SomView
+from os_agent.trajectory import TrajectoryConfig, bezier_path
+from os_agent.translator import Script, Translator
 
 log = get_logger("os_agent.api")
 
@@ -68,6 +72,8 @@ class DesktopAgent:
         self.crop_zoomer = CropZoomer(self.cfg)
         self.code_debug = CodeDebugLoop(self.cfg, self)
         self.autotest = AutotestLoop(self.cfg)
+        self.translator = Translator()
+        self.replayer = Replayer(self)
         log.info("DesktopAgent ready stub=%s mlx=%s", self.cfg.stub_mode, self.mlx.model)
 
     async def screenshot(self) -> Screenshot:
@@ -133,6 +139,28 @@ class DesktopAgent:
     def crop_zoom(self, shot: Screenshot, center_px: tuple[float, float], half_extent_px: int = 120, upscale: int = 2) -> CropResult | None:
         """Patch-level crop & zoom for finer VLM grounding on dense/small controls (Phase 2.3)."""
         return self.crop_zoomer.crop_around(shot, center_px, half_extent_px=half_extent_px, upscale=upscale)
+
+    async def click_humanlike(self, x: float, y: float, start: tuple[float, float] | None = None, traj: TrajectoryConfig | None = None) -> ActionResult:
+        """Human-like click: Bezier path to (x,y) then click (F3.1 execution, Phase 3)."""
+        t0 = time.monotonic()
+        start = start or (0.0, 0.0)
+        path = bezier_path(start, (x, y), traj or TrajectoryConfig(seed=self.cfg.trajectory_seed))
+        await self.executor.move_path(path)
+        res = await self.executor.click(Locator(kind="point", x=x, y=y), button="left")
+        ms = int((time.monotonic() - t0) * 1000)
+        log.info("click_humanlike: %d waypoints %dms ok=%s", len(path), ms, res.get("ok"))
+        return ActionResult(ok=res.get("ok", False), action="click_humanlike", latency_ms=ms, error=res.get("error"), meta={"waypoints": len(path)})
+
+    async def replay(self, script_or_recording) -> ReplayReport:
+        """Replay a Script (F4.2) or Recording (F4.1) with per-step frame assertion (F4.3, Phase 3)."""
+        if isinstance(script_or_recording, Script):
+            report = await self.replayer.replay_script(script_or_recording)
+        elif isinstance(script_or_recording, Recording):
+            report = await self.replayer.replay_recording(script_or_recording)
+        else:
+            raise TypeError(f"replay expects Script or Recording, got {type(script_or_recording).__name__}")
+        log.info("replay: passed=%d failed=%d ok=%s", report.passed, report.failed, report.ok)
+        return report
 
     async def heal(self, query: str) -> ActionResult:
         """Multi-locator self-healing: AX-label → AX-role → SOM → visual."""

@@ -49,6 +49,9 @@ API 对齐 Claude Computer Use 的 `computer` 工具
 - `os_agent/crop_zoom.py` —— Patch 级裁剪放大，精细定位（Phase 2.3）。
 - `os_agent/loops/code_debug.py` —— fusion-code 视觉调试闭环：改码→验证→回喂（F5.2）。
 - `os_agent/loops/autotest.py` —— fusion-autotest 验收闭环：osagent 执行，autotest 断言（F5.3）。
+- `os_agent/recorder.py` —— GUI 轨迹录制：事件+截图上下文→结构化 Step（F4.1）。
+- `os_agent/translator.py` —— 固定坐标 Step→自然语言脚本+Semantic Guard（F4.2）。
+- `os_agent/replayer.py` —— 经 DesktopAgent 逐步回放，每步过帧断言（F4.3）。
 - `os_agent/cli.py` —— `fusion-osagent` CLI（preflight / screenshot / click / health）。
 
 ## 同源复用（不重建）
@@ -148,10 +151,13 @@ pixels_to_points(200.0, 400.0, 2.0)   # (100.0, 200.0)
 | **0** | 骨架 + stub 适配器、双轨感知、ruff/pytest 绿 | ✅ 完成 |
 | **1** | SOM 叠加、帧断言、自愈、FSM 规划器、敏感打码、真实 VL 端到端 | ✅ 完成 |
 | **2** | 快/慢双核推理、Bezier 轨迹、crop/zoom、code-debug + autotest 闭环 | ✅ 完成 |
-| **3** | 录制/回放、类人轨迹执行、敏感打码接入 | 计划中 |
+| **3** | 录制/回放+泛化转译、类人轨迹执行、敏感打码接入 | ✅ 完成 |
 
 Phase 0 验收：stub `api.screenshot()` + `api.click(x,y)` 走通双轨调度；
 `ruff check .` 与 `pytest tests/` 绿。✅
+
+Phase 3 验收：录制→转译→回放闭环跑通，每步过帧断言；Semantic Guard 按描述
+重定位而非固定坐标；Bezier 轨迹驱动类人点击；每次 VLM 调用前敏感区域打码。✅
 
 ## 上游依赖
 
