@@ -122,3 +122,56 @@ async def test_real_mask_sensitive_blacked_out():
     img = Image.open(io.BytesIO(base64.b64decode(out.png_b64)))
     # password field center [20,20,180,30] -> (110, 35) should be black
     assert img.getpixel((110, 35)) == (0, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_real_reasoning_fast_accept():
+    """Real VL: Fast core grounds the OK button with high confidence -> no escalate."""
+    from os_agent.reasoning import Reasoner
+
+    cfg = OsaConfig()
+    mlx = MlxAdapter(cfg)
+    som = SomAnnotator(cfg)
+    try:
+        b64, _ = _make_frame("OK")
+        shot = Screenshot(png_b64=b64, width=400, height=300, scale_factor=2.0, node_tree=None)
+        r = Reasoner(cfg, mlx, som)
+        reason = await r.decide("click the red OK button", shot)
+        assert reason.core == "fast"
+        assert reason.action in ("click", "double_click")
+        assert reason.confidence >= 0.5
+        assert reason.escalated is False
+    finally:
+        await mlx.close()
+
+
+@pytest.mark.asyncio
+async def test_real_reasoning_slow_escalate():
+    """Real VL: a vague/absent target drops Fast confidence -> escalate to Slow.
+
+    Slow model is the same loaded 7B here (32B not loaded); the test verifies
+    the ROUTING (fast->slow) and that Slow returns a structured action, not the
+    model size. Set OSA_SLOW_MODEL to a 32B id to exercise the real slow wake.
+    """
+    from os_agent.reasoning import Reasoner
+
+    cfg = OsaConfig()
+    # point slow at the loaded fast model to avoid 32B load latency unless env overrides
+    cfg.slow_model = os.environ.get("OSA_SLOW_MODEL", cfg.fast_model)
+    mlx = MlxAdapter(cfg)
+    som = SomAnnotator(cfg)
+    try:
+        # blank frame + impossible query -> Fast should be uncertain/none
+        img = Image.new("RGB", (400, 300), (250, 250, 250))
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        shot = Screenshot(png_b64=base64.b64encode(buf.getvalue()).decode(), width=400, height=300, scale_factor=2.0, node_tree=None)
+        r = Reasoner(cfg, mlx, som)
+        # force low-confidence path by patching the floor high
+        r.fast_confidence_floor = 0.95
+        reason = await r.decide("open the nonexistent quantum dialog", shot)
+        assert reason.core == "slow"
+        assert reason.escalated is True
+        assert reason.action  # slow returned some action (likely halt/none)
+    finally:
+        await mlx.close()
