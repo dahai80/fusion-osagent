@@ -86,12 +86,16 @@ async def test_replay_recording_click_passes():
 
 
 async def test_replay_script_visual_guard_relocates():
+    # D11: visual guard + re-location only happens when a describer produced a
+    # real element description. Use a describer so the guard is "visual" and the
+    # replayer re-locates via the fake perception point (50,60), not 999.
     rec = _rec([{"kind": "click", "at": [999.0, 999.0], "button": "left"}])
-    script = Translator().translate(rec)
+    rec.steps[0].screenshot_b64 = "PNG"
+    script = Translator(describer=lambda b64: "the target button").translate(rec)
     agent = _FakeAgent(assert_ok=True)
     rep = Replayer(agent)
     report = await rep.replay_script(script)
-    # visual guard should resolve to fake perception point (50,60), not recorded 999
+    assert report.results[0].guard_kind == "visual"
     assert report.results[0].resolved_at == [50.0, 60.0]
     assert agent.executor.calls[0][1] == (50.0, 60.0)
 

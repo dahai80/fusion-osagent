@@ -8,19 +8,20 @@ target through a degrade chain of alternate strategies before giving up:
   3. Visual grounding            (VLM over fresh screenshot)
 
 Each step refreshes the screenshot + AX tree, so a relayout that moved the
-target is caught. SOM (1.1) is a perception aid for the Slow core, not a heal
-strategy — it overlaps ax-role substring, so it is not a separate heal step.
-Target: >90% self-heal success on UI relayout scenarios.
+target is caught. AX queries go through the unified ax_tree module (A1 fix);
+no duplicate recursive walkers here. SOM (1.1) is a perception aid for the
+Slow core, not a heal strategy — it overlaps ax-role substring, so it is not a
+separate heal step. Target: >90% self-heal success on UI relayout scenarios.
 """
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 
 from fusion_core import get_logger
 
+from os_agent import ax_tree
 from os_agent.adapters.base import Locator, Screenshot
-from os_agent.config import OsaConfig
+from os_agent.config import OsaConfig, pixels_to_points
 from os_agent.perception import Perception
 
 log = get_logger("os_agent.healer")
@@ -68,76 +69,27 @@ class Healer:
         return HealResult(ok=False, locator=None, strategy="exhausted", attempts=attempts, error="target not found")
 
     def _try_ax_label(self, shot: Screenshot, query: str) -> Locator | None:
-        if not shot.node_tree:
+        root = ax_tree.parse(shot.node_tree)
+        if root is None:
             return None
-        try:
-            tree = json.loads(shot.node_tree)
-        except json.JSONDecodeError:
-            return None
-        node = _search_ax_label(tree, query.lower())
-        if node is None:
-            return None
-        return _node_to_locator(node, query, self.cfg.scale_factor, "ax-label")
+        node = ax_tree.find_by_label(root, query, mode="exact")
+        return _node_to_locator(node, query, self._scale(shot), "ax-label") if node else None
 
     def _try_ax_role(self, shot: Screenshot, query: str) -> Locator | None:
-        if not shot.node_tree:
+        root = ax_tree.parse(shot.node_tree)
+        if root is None:
             return None
-        try:
-            tree = json.loads(shot.node_tree)
-        except json.JSONDecodeError:
-            return None
-        role_hint = _guess_role(query)
-        node = _search_ax_role(tree, query.lower(), role_hint)
-        if node is None:
-            return None
-        return _node_to_locator(node, query, self.cfg.scale_factor, "ax-role")
+        role_hint = ax_tree.guess_role(query)
+        node = ax_tree.find_by_role(root, query, role_hint)
+        return _node_to_locator(node, query, self._scale(shot), "ax-role") if node else None
+
+    def _scale(self, shot: Screenshot) -> float:
+        # A5: prefer per-screenshot scale over the global cfg default.
+        return shot.scale_factor or self.cfg.scale_factor
 
 
-def _search_ax_label(node: dict, q: str) -> dict | None:
-    label = str(node.get("label") or node.get("title") or "").lower()
-    if q == label:
-        return node
-    for child in node.get("children") or []:
-        found = _search_ax_label(child, q)
-        if found:
-            return found
-    return None
-
-
-def _search_ax_role(node: dict, q: str, role_hint: str) -> dict | None:
-    role = str(node.get("role") or "").lower()
-    label = str(node.get("label") or node.get("title") or "").lower()
-    if role_hint and role == role_hint and q in label:
-        return node
-    if not role_hint and q in label:
-        return node
-    for child in node.get("children") or []:
-        found = _search_ax_role(child, q, role_hint)
-        if found:
-            return found
-    return None
-
-
-def _guess_role(query: str) -> str:
-    q = query.lower()
-    if "button" in q or q in ("ok", "cancel", "submit", "confirm"):
-        return "axbutton"
-    if "link" in q:
-        return "axlink"
-    if "field" in q or "input" in q or "search" in q:
-        return "axtextfield"
-    if "menu" in q:
-        return "axmenuitem"
-    if "check" in q:
-        return "axcheckbox"
-    return ""
-
-
-def _node_to_locator(node: dict, query: str, scale: float, strategy: str) -> Locator | None:
-    frame = node.get("frame") or node.get("position") or node.get("ax_frame")
-    if not frame or len(frame) < 4:
+def _node_to_locator(node: ax_tree.AxNode, query: str, scale: float, strategy: str) -> Locator | None:
+    if not node.has_frame:
         return None
-    from os_agent.config import pixels_to_points
-
-    cx, cy = pixels_to_points(frame[0] + frame[2] / 2, frame[1] + frame[3] / 2, scale)
-    return Locator(kind="ax", x=cx, y=cy, ax_role=node.get("role"), ax_label=node.get("label"), raw={"strategy": strategy, "query": query})
+    cx, cy = pixels_to_points(*node.center_px(), scale)
+    return Locator(kind="ax", x=cx, y=cy, ax_role=node.role, ax_label=node.label, raw={"strategy": strategy, "query": query})

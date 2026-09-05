@@ -7,27 +7,26 @@ Visual fallback: when AX tree is empty, fall back to a VLM-detected region list
 
 The marked image is what the Slow core reasons over; the index map lets the
 model answer "click mark 3" which we resolve back to a concrete Locator.
+
+A1 fix: interactive-node extraction uses the unified ax_tree.collect_interactive
+(no local recursive walker / INTERACTIVE_ROLES duplicate here). B7: when there
+is no AX tree, marked_b64 is None — never hand the model a mark-less image and
+pretend SOM marks exist.
 """
 from __future__ import annotations
 
 import base64
 import io
-import json
 from dataclasses import dataclass, field
 
 from fusion_core import get_logger
-from PIL import Image, ImageDraw
+from PIL import ImageDraw
 
+from os_agent import ax_tree
 from os_agent.adapters.base import Locator, Screenshot
 from os_agent.config import OsaConfig, pixels_to_points
 
 log = get_logger("os_agent.som")
-
-INTERACTIVE_ROLES = {
-    "axbutton", "axcheckbox", "axradio", "axmenuitem", "axmenu", "axcombobox",
-    "axslider", "axtextfield", "axtextarea", "axsecuretextfield", "axlink",
-    "axpopout", "axdisclosure", "axtoolbar", "axtab", "axgrowarea",
-}
 
 
 @dataclass
@@ -67,29 +66,36 @@ class SomAnnotator:
 
     async def annotate(self, shot: Screenshot, max_nodes: int = 40) -> SomView:
         nodes = self._extract_ax_nodes(shot, max_nodes)
-        if not nodes and shot.png_b64:
-            log.info("SOM: no AX nodes, visual fallback left to Phase 2; returning empty marks")
-        marked = self._draw(shot, nodes) if shot.png_b64 else None
+        # B7: only draw + return a marked image when there are real AX marks.
+        # With no AX tree, marked_b64 stays None so the Slow core knows SOM is
+        # unavailable and reasons over the raw shot instead of phantom marks.
+        marked = self._draw(shot, nodes) if (shot.png_b64 and nodes) else None
+        if not nodes:
+            log.info("SOM: no AX nodes — marked_b64=None (no phantom marks)")
         log.info("SOM: %d nodes marked", len(nodes))
         return SomView(marked_b64=marked, nodes=nodes, screenshot=shot)
 
     def _extract_ax_nodes(self, shot: Screenshot, max_nodes: int) -> list[SomNode]:
-        if not shot.node_tree:
-            return []
-        try:
-            tree = json.loads(shot.node_tree)
-        except json.JSONDecodeError as e:
-            log.warning("SOM ax parse failed: %s", e)
+        root = ax_tree.parse(shot.node_tree)
+        if root is None:
             return []
         out: list[SomNode] = []
-        _collect_interactive(tree, out, max_nodes)
+        for n in ax_tree.collect_interactive(root, max_nodes=max_nodes):
+            out.append(SomNode(
+                index=0,
+                role=n.role,
+                label=n.label or n.title,
+                frame=list(n.frame),
+                ax_identifier=n.identifier,
+            ))
         for i, n in enumerate(out, 1):
             n.index = i
         return out
 
     def _draw(self, shot: Screenshot, nodes: list[SomNode]) -> str:
-        raw = base64.b64decode(shot.png_b64)
-        img = Image.open(io.BytesIO(raw)).convert("RGB")
+        from os_agent import image_cache
+
+        img = image_cache.get_image(shot.png_b64).copy()
         draw = ImageDraw.Draw(img)
         for n in nodes:
             x, y, w, h = n.frame
@@ -102,22 +108,3 @@ class SomAnnotator:
         img.save(buf, format="PNG")
         return base64.b64encode(buf.getvalue()).decode()
 
-
-def _collect_interactive(node: dict, out: list[SomNode], max_nodes: int) -> None:
-    if len(out) >= max_nodes:
-        return
-    role = str(node.get("role") or "").lower()
-    if role in INTERACTIVE_ROLES:
-        frame = node.get("frame") or node.get("position") or node.get("ax_frame")
-        if frame and len(frame) >= 4:
-            out.append(SomNode(
-                index=0,
-                role=role,
-                label=str(node.get("label") or node.get("title") or ""),
-                frame=[float(frame[0]), float(frame[1]), float(frame[2]), float(frame[3])],
-                ax_identifier=node.get("identifier") or node.get("ax_identifier"),
-            ))
-    for child in node.get("children") or []:
-        _collect_interactive(child, out, max_nodes)
-        if len(out) >= max_nodes:
-            return

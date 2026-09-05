@@ -70,8 +70,20 @@ async def test_mask_label_hint_password_substring():
 
 
 @pytest.mark.asyncio
-async def test_mask_no_ax_tree_returns_same():
+async def test_mask_no_ax_tree_fail_closed_blur():
+    # D3/A3 fail-closed: no AX tree -> full-frame blur, never raw pixels to VLM.
+    # Use a non-uniform image so the blur is observable as a pixel change; the
+    # authoritative signal is the meta flag + node_tree=None, not byte equality
+    # (a uniform image blurs to itself).
     masker = SensitiveMasker()
-    shot = Screenshot(png_b64=_png(), width=100, height=100, scale_factor=2.0, node_tree=None)
+    img = Image.new("RGB", (100, 100), (255, 0, 0))
+    img.putpixel((50, 50), (0, 255, 0))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    plain = base64.b64encode(buf.getvalue()).decode()
+    shot = Screenshot(png_b64=plain, width=100, height=100, scale_factor=2.0, node_tree=None)
     out = masker.mask(shot)
-    assert out.png_b64 == shot.png_b64
+    assert out.node_tree is None
+    assert out.meta.get("masked") == "fail-closed-blur"
+    # the distinctive green pixel must be smeared by the blur (no longer pure green)
+    assert _pixel(out.png_b64, 50, 50) != (0, 255, 0)

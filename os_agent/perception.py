@@ -4,22 +4,25 @@ AX track: fusion-executor inspect_tree → structured AX node tree (high precisi
 Visual track: fusion-mlx VLM over screenshot (fallback when AX unavailable:
   WebGL/Canvas/Electron lag/custom-drawn controls), or fusion-browser for Web.
 
-Arbitration: when both tracks return and disagree beyond a tolerance, flag for
-Slow-core arbitration (reasoning.py Phase 2). Phase 0 records the divergence,
-Phase 2 acts on it.
+Coordinate space: API surface is logical points. AX frames are physical pixels
+(converted via pixels_to_points). VLM output is normalized 0-1 fractions of the
+screenshot's physical dimensions; raw-pixel output is rejected as ambiguous
+(D4) so the caller never clicks a wrong unit. Failed visual inference returns
+x=None (D5 fail-loud) — never a (0,0) default that would silently click the
+top-left corner.
 """
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 
 from fusion_core import get_logger
 
+from os_agent import ax_tree
 from os_agent.adapters.base import Locator, Screenshot
 from os_agent.adapters.browser import BrowserAdapter, StubBrowserAdapter
 from os_agent.adapters.executor import ExecutorAdapter, StubExecutorAdapter
 from os_agent.adapters.mlx import MlxAdapter, StubMlxAdapter
-from os_agent.config import OsaConfig
+from os_agent.config import OsaConfig, pixels_to_points
 from os_agent.mask import SensitiveMasker
 
 log = get_logger("os_agent.perception")
@@ -55,12 +58,21 @@ class Perception:
         executor: ExecutorAdapter | StubExecutorAdapter,
         mlx: MlxAdapter | StubMlxAdapter,
         browser: BrowserAdapter | StubBrowserAdapter | None = None,
+        vlm_cache=None,
+        masker: SensitiveMasker | None = None,
     ) -> None:
         self.cfg = cfg
         self.executor = executor
         self.mlx = mlx
         self.browser = browser
-        self.masker = SensitiveMasker()
+        # E4: accept a shared masker so reasoner + perception use one instance
+        # (unified masked_count + a single LRU). Falls back to its own only when
+        # constructed standalone (tests).
+        self.masker = masker if masker is not None else SensitiveMasker()
+        # R6: visual locate is the biggest inference spender (replayer calls it
+        # every step) yet bypassed the reasoner's vlm_cache. Reuse the same
+        # cache so a repeated identical (prompt, masked image) skips re-infer.
+        self.vlm_cache = vlm_cache
 
     async def capture(self, prefer_ax: bool = True) -> Screenshot:
         if prefer_ax:
@@ -76,10 +88,10 @@ class Perception:
     async def locate(self, query: str, shot: Screenshot | None = None) -> PerceptionResult:
         shot = shot or await self.capture(prefer_ax=True)
         if shot.has_ax:
-            loc = self._find_in_ax(shot.node_tree, query)
+            loc, conf = self._find_in_ax(shot, query)
             if loc is not None:
-                log.info("AX locate hit: query=%r -> %s", query, loc)
-                return PerceptionResult(locator=loc, track="ax", screenshot=shot, confidence=0.95, ax_available=True)
+                log.info("AX locate hit: query=%r -> %s conf=%.2f", query, loc, conf)
+                return PerceptionResult(locator=loc, track="ax", screenshot=shot, confidence=conf, ax_available=True)
             log.info("AX tree present but no match for %r — visual fallback", query)
         loc = await self._locate_visual(query, shot)
         return PerceptionResult(
@@ -90,72 +102,102 @@ class Perception:
             ax_available=shot.has_ax,
         )
 
-    def _find_in_ax(self, node_tree: str | None, query: str) -> Locator | None:
-        if not node_tree:
-            return None
-        try:
-            tree = json.loads(node_tree)
-        except json.JSONDecodeError as e:
-            log.warning("AX tree parse failed: %s", e)
-            return None
-        q = query.lower()
-        node = _search_ax(tree, q)
-        if node is None:
-            return None
-        frame = node.get("frame") or node.get("position") or node.get("ax_frame")
-        if not frame or len(frame) < 4:
-            return None
-        x, y, w, h = frame[0], frame[1], frame[2], frame[3]
-        from os_agent.config import pixels_to_points
+    def _find_in_ax(self, shot: Screenshot, query: str) -> tuple[Locator | None, float]:
+        """AX locate with graded confidence (B1) and exact-first matching (B2).
 
-        cx, cy = pixels_to_points(x + w / 2, y + h / 2, self.cfg.scale_factor)
+        Short/generic queries used to substring-match almost any node ("a" hit
+        the first label containing "a"). Now: require a minimum query length,
+        try exact -> prefix -> substring in that order, and report a confidence
+        that reflects match precision (exact > prefix > substring) so a fuzzy
+        hit no longer carries a hardcoded 0.95 that skips visual cross-check.
+        Returns (locator, confidence); (None, 0.0) when nothing usable matches.
+        """
+        root = ax_tree.parse(shot.node_tree)
+        if root is None:
+            return None, 0.0
+        q = query.strip()
+        # B2: refuse degenerate short queries that substring-match everything.
+        if len(q) < 2:
+            log.info("AX query too short (%r) — skip AX match", q)
+            return None, 0.0
+        node = ax_tree.find_by_label(root, q, mode="exact")
+        conf = 0.95 if node else 0.0
+        if node is None:
+            node = ax_tree.find_by_label(root, q, mode="prefix")
+            conf = 0.85 if node else 0.0
+        if node is None:
+            node = ax_tree.find_by_label(root, q, mode="substring")
+            conf = 0.7 if node else 0.0
+        if node is None:
+            role = ax_tree.guess_role(q)
+            if role:
+                node = ax_tree.find_by_role(root, q, role)
+                conf = 0.75 if node else 0.0
+        if node is None or not node.has_frame:
+            return None, 0.0
+        # A5: prefer the per-screenshot scale (multi-display safe) over the
+        # global cfg default, so a frame from a 1x external display is not
+        # converted with the 2x Retina assumption.
+        scale = shot.scale_factor or self.cfg.scale_factor
+        cx, cy = pixels_to_points(*node.center_px(), scale)
         return Locator(
             kind="ax",
             x=cx,
             y=cy,
-            ax_role=node.get("role"),
-            ax_label=node.get("label") or node.get("title"),
-            raw={"frame": frame, "matched": query},
-        )
+            ax_role=node.role,
+            ax_label=node.label or node.title,
+            raw={"frame": list(node.frame), "matched": query, "ax_confidence": conf},
+        ), conf
 
     async def _locate_visual(self, query: str, shot: Screenshot) -> Locator:
         if not shot.png_b64:
             log.error("no screenshot for visual locate")
-            return Locator(kind="visual", x=0.0, y=0.0, visual_query=query, raw={"confidence": 0.0})
+            return Locator(kind="visual", x=None, y=None, visual_query=query, raw={"confidence": 0.0, "error": "no screenshot"})
         shot = self.masker.mask(shot)  # F3.5: never feed raw sensitive pixels to VLM
         prompt = GROUNDING_PROMPT.format(query=query)
-        try:
-            data = await self.mlx.chat_json(prompt, shot.png_b64)
-        except Exception as e:
-            log.error("visual locate mlx failed: %s", e)
-            return Locator(kind="visual", x=0.0, y=0.0, visual_query=query, raw={"confidence": 0.0, "error": str(e)})
-        nx = float(data.get("x", 0.0))
-        ny = float(data.get("y", 0.0))
+        # R6: short-circuit identical visual-locate inferences via the shared
+        # vlm_cache (same scheme as the reasoner) so replayer guard re-locates
+        # on an unchanged screen skip the VLM round-trip.
+        model = getattr(self.mlx, "model", "")
+        data = None
+        if self.vlm_cache is not None:
+            cached, hit = self.vlm_cache.get(model, prompt, shot.png_b64 or "")
+            if hit:
+                data = cached
+        if data is None:
+            try:
+                data = await self.mlx.chat_json(prompt, shot.png_b64)
+            except Exception as e:
+                log.exception("visual locate mlx failed")
+                return Locator(kind="visual", x=None, y=None, visual_query=query, raw={"confidence": 0.0, "error": str(e)})
+            if self.vlm_cache is not None:
+                self.vlm_cache.put(model, prompt, shot.png_b64 or "", data)
+        if data is None:
+            log.warning("visual locate: mlx returned no JSON for %r", query)
+            return Locator(kind="visual", x=None, y=None, visual_query=query, raw={"confidence": 0.0, "error": "non-JSON"})
+        nx = data.get("x")
+        ny = data.get("y")
         conf = float(data.get("confidence", 0.0))
-        # VLM output is non-deterministic: may return normalized (0-1) OR raw pixels.
-        # Normalize to points in the API's logical-point space.
-        if shot.width and shot.height:
-            if 0.0 <= nx <= 1.0 and 0.0 <= ny <= 1.0:
-                x = nx * shot.width / self.cfg.scale_factor
-                y = ny * shot.height / self.cfg.scale_factor
-            else:
-                # raw physical pixels -> logical points
-                x = nx / self.cfg.scale_factor
-                y = ny / self.cfg.scale_factor
-                log.warning("visual locate: VLM returned raw pixels (not normalized); converting")
-        else:
-            x, y = nx, ny
-        log.info("visual locate: query=%r raw=(%.3f,%.3f) point=(%.1f,%.1f) conf=%.2f", query, nx, ny, x, y, conf)
+        if nx is None or ny is None:
+            log.warning("visual locate: missing x/y for %r", query)
+            return Locator(kind="visual", x=None, y=None, visual_query=query, raw={"confidence": conf, "error": "missing x/y"})
+        try:
+            nx = float(nx)
+            ny = float(ny)
+        except (TypeError, ValueError):
+            log.warning("visual locate: non-numeric x/y (%r, %r)", nx, ny)
+            return Locator(kind="visual", x=None, y=None, visual_query=query, raw={"confidence": conf, "error": "non-numeric x/y"})
+        # D4: only accept normalized fractions (0..1). Raw pixel output is
+        # ambiguous (which unit? physical vs logical?) — reject loudly rather
+        # than guess a conversion. Require both dimensions to validate.
+        if not (0.0 <= nx <= 1.0 and 0.0 <= ny <= 1.0):
+            log.warning("visual locate: VLM returned non-normalized coords (%.3f,%.3f) for %r — rejecting", nx, ny, query)
+            return Locator(kind="visual", x=None, y=None, visual_query=query, raw={"confidence": conf, "error": "non-normalized coords"})
+        if not (shot.width and shot.height):
+            log.warning("visual locate: screenshot has no dimensions; cannot map normalized coords")
+            return Locator(kind="visual", x=None, y=None, visual_query=query, raw={"confidence": conf, "error": "no screenshot dimensions"})
+        scale = shot.scale_factor or self.cfg.scale_factor
+        x = nx * shot.width / scale
+        y = ny * shot.height / scale
+        log.info("visual locate: query=%r norm=(%.3f,%.3f) point=(%.1f,%.1f) conf=%.2f", query, nx, ny, x, y, conf)
         return Locator(kind="visual", x=x, y=y, visual_query=query, raw={"confidence": conf, "label": data.get("label")})
-
-
-def _search_ax(node: dict, query: str) -> dict | None:
-    label = (str(node.get("label") or node.get("title") or node.get("text") or "")).lower()
-    role = str(node.get("role") or "").lower()
-    if query in label or query in role:
-        return node
-    for child in node.get("children") or []:
-        found = _search_ax(child, query)
-        if found:
-            return found
-    return None

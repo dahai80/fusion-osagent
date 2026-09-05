@@ -64,8 +64,12 @@ def always_true(_shot: Screenshot, _state: dict) -> GuardResult:
 class Planner:
     """Runs a Plan step-by-step with State Guard + one heal-retry."""
 
-    def __init__(self, max_retries: int = 1) -> None:
+    def __init__(self, max_retries: int = 1, max_heal_cycles: int = 4) -> None:
         self.max_retries = max_retries
+        # A2: bound total successful heals so a flapping step (execute fail →
+        # heal ok → execute fail ...) cannot loop forever. Each successful heal
+        # used to reset `retries` to 0, so the while-loop never exited.
+        self.max_heal_cycles = max_heal_cycles
 
     def check_guard(self, step: Step, shot: Screenshot, state: dict) -> GuardResult:
         guard = step.guard or always_true
@@ -102,7 +106,16 @@ class Planner:
             plan.state["halt_reason"] = guard_res.reason
             return plan
 
-        ok = await execute(step, shot, plan)
+        ok = False
+        try:
+            ok = await execute(step, shot, plan)
+        except Exception as e:
+            # B17: an execute exception used to bubble out of run() and leave
+            # the plan in RUNNING with a history entry missing action_ok.
+            # Catch, record the failure loudly, and halt the plan so state is
+            # consistent and consumers never KeyError on action_ok.
+            log.error("execute %s raised at step %s: %s", step.action, step.name, e, exc_info=True)
+            plan.history[-1]["execute_error"] = str(e)
         plan.history[-1]["action_ok"] = ok
         if not ok:
             log.warning("action %s failed at step %s", step.action, step.name)
@@ -117,22 +130,47 @@ class Planner:
             log.info("plan %s done after step %s", plan.name, step.name)
         return plan
 
-    async def run(self, plan: Plan, capture, execute) -> Plan:
-        """Run all remaining steps: capture before each, advance, heal-retry once on guard fail."""
+    async def run(self, plan: Plan, capture, execute, heal=None) -> Plan:
+        """Run all remaining steps: capture before each, advance, heal-retry once on halt.
+
+        D8 fix: when a step halts the plan and a `heal` callback is supplied
+        (heal(plan, shot) -> bool), the heal is actually invoked before retry;
+        without heal the old re-advance-same-step behavior is kept. A second
+        halt after exhausting retries halts for good (Rule 12).
+        """
         retries = 0
-        while plan.status == PlanStatus.RUNNING or plan.status == PlanStatus.PENDING:
+        heal_cycles = 0
+        while plan.status in (PlanStatus.RUNNING, PlanStatus.PENDING):
             shot = await capture()
-            prev_status = plan.status
             await self.advance(plan, shot, execute)
             if plan.status == PlanStatus.HALTED and retries < self.max_retries:
                 retries += 1
-                log.info("plan %s halted, heal-retry %d/%d", plan.name, retries, self.max_retries)
+                healed = False
+                if heal is not None and heal_cycles < self.max_heal_cycles:
+                    try:
+                        healed = bool(await heal(plan, shot))
+                    except Exception as e:
+                        log.error("heal callback raised: %s", e)
+                        healed = False
+                    log.info("plan %s halted, heal %s retry %d/%d cycle %d/%d", plan.name, "ok" if healed else "failed", retries, self.max_retries, heal_cycles, self.max_heal_cycles)
+                elif heal is not None and heal_cycles >= self.max_heal_cycles:
+                    log.error("plan %s halted, heal cycle budget exhausted (%d) — halt for good", plan.name, heal_cycles)
+                    plan.state["halt_reason"] = f"heal cycle budget exhausted ({heal_cycles})"
+                    break
+                else:
+                    log.info("plan %s halted, no heal — re-advance retry %d/%d", plan.name, retries, self.max_retries)
+                if healed:
+                    plan.state.pop("halt_step", None)
+                    plan.state.pop("halt_reason", None)
+                    heal_cycles += 1
+                    # R3: a successful heal means the halt was transient — give
+                    # the plan its full retry budget back so a subsequent
+                    # genuine failure is not mistaken for "retries exhausted".
+                    # A2: but heal_cycles is NOT reset, so a flapping step is
+                    # bounded by max_heal_cycles instead of looping forever.
+                    retries = 0
                 plan.status = PlanStatus.RUNNING
-                plan.cursor = max(0, plan.cursor)
                 continue
             if plan.status in (PlanStatus.DONE, PlanStatus.HALTED):
-                break
-            if plan.status == prev_status and plan.status == PlanStatus.RUNNING and plan.cursor >= len(plan.steps):
-                plan.status = PlanStatus.DONE
                 break
         return plan

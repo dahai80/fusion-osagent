@@ -9,9 +9,15 @@ GuiAction kinds (verified v0.2.9):
   focus_app, click, type_text, key_press, hold_key, screenshot, inspect_tree,
   scroll, drag, double_click, triple_click, right_click, hover,
   window_close, window_minimize, window_zoom, window_resize, wait
+
+The upstream client is synchronous (blocking UDS round-trip). Every call is
+offloaded to a worker thread via asyncio.to_thread so the event loop is never
+blocked and asyncio.wait_for / step_timeout_ms can actually interrupt a slow
+gui_action (D1 fix). A per-call timeout + one retry make the adapter robust.
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fusion_core import get_logger
@@ -51,8 +57,43 @@ class ExecutorAdapter:
             self._ex = FusionSandboxExecutor(sock_path=self.cfg.executor_sock)
         return self._ex
 
+    async def _run(self, action: dict) -> dict:
+        """Offload the blocking gui_action to a thread; timeout + one retry.
+
+        E4: the module docstring promises "one retry" but the old impl made a
+        single attempt. Now it retries once on timeout/exception (matching the
+        docstring) so a transient UDS hiccup does not fail the whole step.
+        """
+        raw_timeout = self.cfg.step_timeout_ms / 1000.0
+        timeout = max(raw_timeout, 5.0)
+        if timeout > raw_timeout:
+            log.warning("executor step_timeout_ms=%d clamped to %.1fs floor", self.cfg.step_timeout_ms, timeout)
+        last_err = None
+        for attempt in range(2):  # initial + one retry
+            def _do() -> dict:
+                res = self._ensure().gui_action(action)
+                return {"ok": res.ok, "error": res.error, "kind": action.get("kind")}
+            try:
+                res = await asyncio.wait_for(asyncio.to_thread(_do), timeout=timeout)
+                if not res.get("ok"):
+                    log.warning("executor %s failed (attempt %d): %s", action.get("kind"), attempt + 1, res.get("error"))
+                    last_err = res.get("error")
+                    # a logical failure (e.g. "no such element") is not going to
+                    # be fixed by retrying — only retry transient transport errors.
+                    return res
+                return res
+            except TimeoutError:
+                last_err = "executor timeout"
+                log.error("executor %s timed out after %.1fs (attempt %d)", action.get("kind"), timeout, attempt + 1)
+                self._ex = None
+            except Exception as e:
+                last_err = str(e)
+                log.error("executor %s raised (attempt %d): %s", action.get("kind"), attempt + 1, e)
+                self._ex = None  # broken connection; force reconnect next call
+        return {"ok": False, "error": last_err or "executor failed", "kind": action.get("kind")}
+
     async def screenshot(self) -> Screenshot:
-        res = self._ensure().gui_action({"kind": KIND_SCREENSHOT})
+        res = await self._gui_result(KIND_SCREENSHOT)
         if not res.ok:
             log.error("executor screenshot failed: %s", res.error)
         return Screenshot(
@@ -64,7 +105,7 @@ class ExecutorAdapter:
         )
 
     async def inspect_tree(self) -> Screenshot:
-        res = self._ensure().gui_action({"kind": KIND_INSPECT_TREE})
+        res = await self._gui_result(KIND_INSPECT_TREE)
         return Screenshot(
             png_b64=res.screenshot_png_b64,
             width=res.screenshot_width,
@@ -72,6 +113,38 @@ class ExecutorAdapter:
             scale_factor=self.cfg.scale_factor,
             node_tree=res.node_tree,
         )
+
+    async def _gui_result(self, kind: str) -> Any:
+        """Raw GuiResult for screenshot/inspect_tree (need attribute access).
+
+        E5: inspect_tree walks the full AX hierarchy and on a complex window
+        (hundreds of nodes) routinely exceeds the 5s click timeout. Give it an
+        independent, longer budget so AX traversal is not misclassified as a
+        timeout failure that permanently demotes perception to plain screenshot.
+        R5: a single attempt let an instantaneous UDS hiccup fail the whole
+        perception cycle (no screenshot → visual locate has no image). Retry
+        once on transient transport error so a blip does not abort locate.
+        """
+        if kind == KIND_INSPECT_TREE:
+            timeout = max(self.cfg.inspect_timeout_ms / 1000.0, 5.0)
+        else:
+            timeout = max(self.cfg.step_timeout_ms / 1000.0, 5.0)
+        action = {"kind": kind}
+        last_err = None
+        for attempt in range(2):
+            try:
+                return await asyncio.wait_for(
+                    asyncio.to_thread(self._ensure().gui_action, action), timeout=timeout
+                )
+            except TimeoutError:
+                last_err = f"executor timeout: {kind}"
+                log.error("executor %s timed out after %.1fs (attempt %d)", kind, timeout, attempt + 1)
+                self._ex = None
+            except Exception as e:
+                last_err = str(e)
+                log.error("executor %s raised (attempt %d): %s", kind, attempt + 1, e)
+                self._ex = None
+        return _GuiResultError(last_err or f"executor failed: {kind}")
 
     async def click(self, loc: Locator, button: str = "left") -> dict:
         x, y = self._to_pixel(loc)
@@ -82,60 +155,85 @@ class ExecutorAdapter:
             "triple": KIND_TRIPLE_CLICK,
             "hover": KIND_HOVER,
         }.get(button, KIND_CLICK)
-        return self._run({"kind": kind, "at": [x, y]})
+        return await self._run({"kind": kind, "at": [x, y]})
 
     async def type_text(self, text: str) -> dict:
-        return self._run({"kind": KIND_TYPE_TEXT, "text": text})
+        return await self._run({"kind": KIND_TYPE_TEXT, "text": text})
 
     async def key_press(self, key: str, modifiers: list[str] | None = None) -> dict:
         action: dict = {"kind": KIND_KEY_PRESS, "key": key}
         if modifiers:
             action["modifiers"] = modifiers
-        return self._run(action)
+        return await self._run(action)
 
     async def scroll(self, loc: Locator, dx: float = 0.0, dy: float = 0.0) -> dict:
         x, y = self._to_pixel(loc)
-        return self._run({"kind": KIND_SCROLL, "at": [x, y], "delta": [dx, dy]})
+        return await self._run({"kind": KIND_SCROLL, "at": [x, y], "delta": [dx, dy]})
 
     async def drag(self, src: Locator, dst: Locator) -> dict:
         x1, y1 = self._to_pixel(src)
         x2, y2 = self._to_pixel(dst)
-        return self._run({"kind": KIND_DRAG, "from": [x1, y1], "to": [x2, y2]})
+        return await self._run({"kind": KIND_DRAG, "from": [x1, y1], "to": [x2, y2]})
 
     async def move_path(self, points: list[tuple[float, float]]) -> dict:
         """Step through Bezier waypoints via per-point hover (F3.1 execution).
 
-        Pending upstream E2 (batch-move), this is N round-trips; the path is
-        human-like regardless. Returns last result; ok=False if any step fails.
+        Reduced waypoint set (D10 fix): upstream E2 will give batch-move; until
+        then a small human-like path (~6 points) keeps round-trips bounded and
+        the loop responsive. ok=False if any step fails.
+        R3: a whole-path budget (cfg.move_path_timeout_ms) bounds the total; each
+        per-point hover already has its own 5s timeout but 24 points × 5s = 120s
+        worst case with no overall deadline could hang the Agent. Exceeding the
+        path budget stops the move and returns the last failure.
         """
+        import time as _time
+
+        deadline = _time.monotonic() + (self.cfg.move_path_timeout_ms / 1000.0)
         last = {"ok": True, "error": None, "kind": "move_path"}
         for pt in points:
+            if _time.monotonic() > deadline:
+                log.error("move_path exceeded whole-path budget %dms — stopping", self.cfg.move_path_timeout_ms)
+                return {"ok": False, "error": "move_path timeout", "kind": "move_path"}
             x, y = points_to_pixels(pt[0], pt[1], self.cfg.scale_factor)
-            last = self._run({"kind": KIND_HOVER, "at": [x, y]})
+            last = await self._run({"kind": KIND_HOVER, "at": [x, y]})
             if not last.get("ok"):
                 log.warning("move_path stopped at %s: %s", pt, last.get("error"))
                 return last
         return last
 
     async def wait(self, seconds: float) -> dict:
-        return self._run({"kind": KIND_WAIT, "seconds": seconds})
+        return await self._run({"kind": KIND_WAIT, "seconds": seconds})
 
     async def focus_app(self, bundle_or_name: str) -> dict:
-        return self._run({"kind": KIND_FOCUS_APP, "target": bundle_or_name})
+        return await self._run({"kind": KIND_FOCUS_APP, "target": bundle_or_name})
 
     def _to_pixel(self, loc: Locator) -> tuple[float, float]:
         x, y = loc.as_point()
         return points_to_pixels(x, y, self.cfg.scale_factor)
 
-    def _run(self, action: dict) -> dict:
-        res = self._ensure().gui_action(action)
-        if not res.ok:
-            log.warning("executor %s failed: %s", action.get("kind"), res.error)
-        return {"ok": res.ok, "error": res.error, "kind": action.get("kind")}
-
     async def close(self) -> None:
+        ex = self._ex
         self._ex = None
+        if ex is not None and hasattr(ex, "close"):
+            try:
+                await asyncio.to_thread(ex.close)
+            except Exception as e:
+                log.warning("executor close raised: %s", e)
         log.info("executor adapter closed")
+
+
+class _GuiResultError:
+    """Stand-in GuiResult when the call fails, so attribute access is safe."""
+
+    ok = False
+    error = "executor error"
+    screenshot_png_b64 = None
+    screenshot_width = None
+    screenshot_height = None
+    node_tree = None
+
+    def __init__(self, error: str) -> None:
+        self.error = error
 
 
 class StubExecutorAdapter:

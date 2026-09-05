@@ -131,7 +131,11 @@ class Replayer:
             before = await self._capture()
             dispatch_ok = await self._dispatch(verb, action)
             after = await self._capture()
-            assert_ok, asserted, ratio, err = await self._assert(before, after, target_desc or verb)
+            # B9: only pass a semantic expectation when a real target description
+            # exists. Using the verb ("click") as `expected` made the verifier
+            # judge a meaningless string; without a desc, fall back to pixel-diff
+            # only (expected=None).
+            assert_ok, asserted, ratio, err = await self._assert(before, after, target_desc or None)
             ms = int((time.monotonic() - t0) * 1000)
             step_ok = dispatch_ok and (not asserted or assert_ok)
             return StepResult(
@@ -175,13 +179,22 @@ class Replayer:
                 return False
             res = await self.agent.executor.scroll(Locator(kind="point", x=at[0], y=at[1]), 0.0, action.get("dy", -3.0))
             return bool(res.get("ok"))
-        if verb in ("drag from", "drop at"):
+        if verb in ("drag from", "drag_start", "drag"):
+            # B8: a drag is ONE atomic executor.drag(src,dst). The paired
+            # "drop at"/"drag_end" step is the release half — it must NOT call
+            # drag again (double-execution). Only the start half dispatches.
+            # E3: accept the unified "drag" verb as well as the two half-verbs
+            # so a single change to the translator VERB map cannot break one
+            # path while the other keeps working.
             src = action.get("at")
             dst = action.get("drag_to")
             if not src or not dst:
                 return False
             res = await self.agent.executor.drag(Locator(kind="point", x=src[0], y=src[1]), Locator(kind="point", x=dst[0], y=dst[1]))
             return bool(res.get("ok"))
+        if verb in ("drop at", "drag_end"):
+            # release half of the drag — already performed by the start step
+            return True
         if verb == "wait":
             await self.agent.executor.wait(action.get("seconds", 0.5))
             return True

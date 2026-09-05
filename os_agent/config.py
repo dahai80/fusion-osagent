@@ -52,7 +52,8 @@ def _resolve_mlx_api_key() -> str:
     try:
         import json
 
-        d = json.load(open(settings))
+        with open(settings) as fh:
+            d = json.load(fh)
         key = d.get("auth", {}).get("api_key", "")
         if key:
             return key
@@ -91,12 +92,20 @@ class OsaConfig:
         default_factory=lambda: os.environ.get("OSA_AGENT_STUDIO_URL", "http://localhost:11440")
     )
     scale_factor: float = field(default_factory=lambda: _env_float("OSA_SCALE_FACTOR", 2.0))
-    step_timeout_ms: int = field(default_factory=lambda: _env_int("OSA_STEP_TIMEOUT_MS", 200))
+    step_timeout_ms: int = field(default_factory=lambda: _env_int("OSA_STEP_TIMEOUT_MS", 5000))
     step_latency_target_ms: int = field(default_factory=lambda: _env_int("OSA_LATENCY_TARGET_MS", 150))
+    move_path_timeout_ms: int = field(default_factory=lambda: _env_int("OSA_MOVE_PATH_TIMEOUT_MS", 30000))  # R3: whole-path budget
+    assert_diff_threshold: float = field(default_factory=lambda: _env_float("OSA_ASSERT_DIFF_THRESHOLD", 0.002))  # R4
+    vlm_concurrency: int = field(default_factory=lambda: _env_int("OSA_VLM_CONCURRENCY", 2))  # A4
+    image_cache_max_entries: int = field(default_factory=lambda: _env_int("OSA_IMAGE_CACHE_MAX", 32))  # A5
+    planner_max_heal_cycles: int = field(default_factory=lambda: _env_int("OSA_PLANNER_MAX_HEAL_CYCLES", 4))  # A2
     stub_mode: bool = field(default_factory=lambda: _env_bool("OSA_STUB_MODE", False))
     dual_track_arbitrate: bool = field(default_factory=lambda: _env_bool("OSA_DUAL_TRACK_ARBITRATE", True))
     fast_confidence_floor: float = field(default_factory=lambda: _env_float("OSA_FAST_CONF_FLOOR", 0.5))
-    trajectory_seed: int | None = field(default_factory=lambda: _env_int("OSA_TRAJECTORY_SEED", 7) if os.environ.get("OSA_TRAJECTORY_SEED") else 7)
+    vlm_cache_ttl: float = field(default_factory=lambda: _env_float("OSA_VLM_CACHE_TTL", 3.0))  # seconds; 0 disables
+    vlm_timeout: float = field(default_factory=lambda: _env_float("OSA_VLM_TIMEOUT", 60.0))  # seconds; A2 bound on a single mlx inference
+    inspect_timeout_ms: int = field(default_factory=lambda: _env_int("OSA_INSPECT_TIMEOUT_MS", 15000))  # E5: AX tree walk needs longer than a click
+    trajectory_seed: int | None = field(default_factory=lambda: _env_int("OSA_TRAJECTORY_SEED", 0) or None)  # N10: None = per-target derived seed
 
 
 def points_to_pixels(x: float, y: float, scale: float) -> tuple[float, float]:

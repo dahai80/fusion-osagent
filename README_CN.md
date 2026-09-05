@@ -32,6 +32,9 @@ API 对齐 Claude Computer Use 的 `computer` 工具
 ```
 
 - `os_agent/config.py` —— 环境变量驱动的 `OsaConfig`，点↔像素转换。
+- `os_agent/ax_tree.py` —— 统一 AX 树解析器（parse / find_by_label / find_by_role / collect_interactive / collect_sensitive / guess_role / strip_sensitive_labels）。
+- `os_agent/image_cache.py` —— 共享解码图像 LRU 缓存（mask / SOM / diff 复用同一帧的单次解码）。
+- `os_agent/vlm_cache.py` —— VLM 结果缓存（TTL+LRU，键为 model+prompt+图像哈希；相同输入跳过重复推理）。
 - `os_agent/adapters/base.py` —— `Locator`、`Screenshot`、`Adapter` 协议。
 - `os_agent/adapters/executor.py` —— 封装 `fusion-executor` 的 `gui_action`（18 种 GuiAction）。
 - `os_agent/adapters/mlx.py` —— 封装 `fusion-mlx` 多模态对话。
@@ -159,14 +162,50 @@ Phase 0 验收：stub `api.screenshot()` + `api.click(x,y)` 走通双轨调度�
 Phase 3 验收：录制→转译→回放闭环跑通，每步过帧断言；Semantic Guard 按描述
 重定位而非固定坐标；Bezier 轨迹驱动类人点击；每次 VLM 调用前敏感区域打码。✅
 
+## 加固（审计 0904）
+
+一次完整对抗审计（`audit/fusion-osagent-0904.md`）推动了 P0–P3 全部发现的加固修复。要点：
+
+- **P0 致命** —— executor 路径改为真实 `asyncio.to_thread`（不再假异步阻塞）；browser 适配器复用单一 UDS socket + 原子 RPC id 计数；敏感打码 fail-closed（无 AX 树 → 整帧模糊，绝不把原始像素送 VLM）；VLM 坐标输出消歧（归一化 vs 像素），`chat_json` fail-loud（返回 `None`，绝不返回 `{}`）；Recorder `CGEventTapSource` 在独立线程跑 tap + 线程安全队列；帧断言按直方图统计变化像素数（非 bbox 面积）；文件句柄全部 `with` 关闭。
+- **P1 逻辑** —— AX 定位采用分级置信度（精确 0.95 → 前缀 0.85 → 子串 0.7 → 角色 0.75）且设最小查询长度；planner 愈合重试有界并 `exc_info` 记录；translator guard 无 describer 时降级为 `point`；replayer 拖拽派发一次真实 `drag`；`code_debug` 传 `expected=None`（不做无意义语义匹配）并在点击后采集真实 `before` 帧（B3）。
+- **P2 架构** —— 统一 `os_agent/ax_tree.py` 解析器取代三套重复递归遍历（`parse`、`find_by_label` 精确/前缀/子串三模式、`find_by_role`、`collect_interactive`、`collect_sensitive`、`guess_role`、`strip_sensitive_labels`）；坐标携带每帧 `scale_factor` 而非全局假设。
+- **P3 性能** —— 共享解码图像缓存（`os_agent/image_cache.py`），mask / SOM / diff 复用同一帧单次解码；帧 diff 先降采样到 256px 缩略图再做直方图；VLM 结果缓存（`os_agent/vlm_cache.py`，TTL+LRU，键为 model+prompt+图像哈希）在 `decide` 两次输入未变时跳过重复推理。
+- **可维护性** —— 顶层 import（无内联 `import`）；关键异常路径用 `log.exception` 输出 traceback；报告写入限定在 env 可配白名单根（`OSA_REPORT_ROOT`）并拒绝路径穿越。
+
+D14（真实端到端跑通）受环境门控：7 个集成测试在 `OSA_RUN_INTEGRATION=1` 后端，需 Accessibility TCC 授权 + 已加载 VL 模型。TCC 授权属宿主环境步骤，非代码缺陷。
+
+## 加固（审计 0905）
+
+第二次对抗审计（`audit/fusion-osagent-audit-result-0905.md`）推动了 P0–P3 加固，聚焦并发、阻塞与分辨率无关安全。该审计结论：**尚不可企业级生产商用发布**；修复后可达"受控内部 Beta"。要点：
+
+- **P0 致命** —— `BrowserAdapter._rpc_sync` 全程 `threading.Lock` 串行化 send/recv（并发 RPC 不再在共享 UDS socket 上交错长度前缀帧），并修复真实模式构造崩溃的漏 `import threading`；VLM `chat_vision` 以 `asyncio.wait_for(timeout=cfg.vlm_timeout)` 限界，mlx 推理卡住不再永久挂起 Agent loop；`assert_changed` 缺 `before` 帧时拒绝执行，不再背靠背捕获恒报"无变化"。
+- **P1 高危** —— `_extract_json` 优先 ```json``` 代码块，7B fast 口语前缀不再每次强制 escalate slow；mask 模糊半径按帧长边自适应（`max(16, long_edge//32)`），4K Retina fail-closed 打码不再可辨认；planner 愈合成功重置 retry 预算；`CGEventTapSource` 接收真实显示器 scale 而非硬编码 2.0（多 DPI 安全）；`strip_sensitive_labels`/`_to_dict` 改迭代 + 深度上限，深 AX 树不再 RecursionError 崩溃 fail-closed 路径。
+- **P2/P3** —— perception 死代码重复 return 块删除；`image_cache` 加锁（`asyncio.to_thread` 下线程安全）；`vlm_cache` prompt 改 sha1 哈希（dict key 不再存 KB 级字符串）；executor `_run` 真重试一次（兑现 docstring）并在 clamp 时告警；`inspect_tree` 独立超时（`OSA_INSPECT_TIMEOUT_MS` 默认 15s），AX 遍历不再被误判为点击超时；`collect_sensitive` 早停。
+- 每项修复均有回归测试在 `tests/test_audit0905.py`。
+
+### 审计 0905 —— v2 补充修复
+
+后续一轮关闭了审计剩余项（E4、E6）及邻近运行时缺陷（N5、N9、N10），并收紧两处早期修复：
+
+- **E4（P2）** —— `Reasoner` 与 `Perception` 现共享同一个 `SensitiveMasker`（在 `DesktopAgent` 构造一次）。此前两个独立 masker 的 `masked_count` 计数与 LRU 缓存各自分裂，fast→slow 升级对同一帧重复打码且无缓存复用，打码区域计数也不准。
+- **E6（P3）** —— `Translator` 新增 `translate_async`/`_describe_async`，将阻塞的模型 `describer` 通过 `asyncio.to_thread` 下放到工作线程，翻译录制不再按步逐次 VLM 阻塞事件循环且无法取消。同步 `translate()` 路径不变，供离线测试。
+- **N5** —— Fast 核心在帧无 AX 树时直接跳到 Slow。fail-closed 打码会把无 AX 整帧模糊到不可辨认，7B Fast 几乎总返回 `"none"` 随即升级 —— 但白白浪费一次 VLM 往返。直接跳过 Fast 移除该无效推理。
+- **N9** —— `click_humanlike` 现从已跟踪光标位置（`DesktopAgent._cursor_pos`）起笔，而非固定 `(0,0)`。每次点击从角落瞬移到目标既突兀又是机器人指纹；点击后更新位置。
+- **N10** —— `bezier_path` 无显式 seed 时按起止坐标派生每目标 seed（同目标可复现、跨目标变化），而非固定 `seed=7` 使每次点击抖动形状完全一致——强机器人指纹。`OSA_TRAJECTORY_SEED` 默认 `None`（每目标）；严格回放可设固定整数。
+- **A2（收紧）** —— `Planner` 以 `max_heal_cycles`（默认 4，`OSA_PLANNER_MAX_HEAL_CYCLES`）限界总愈合次数，flapping 步骤（执行失败→愈合成功→执行失败…）不再死循环，尽管每次愈合成功仍重置单步 retry 预算。
+- **R4（收紧）** —— `assert_changed` 阈值改取 `cfg.assert_diff_threshold`（默认 0.002，`OSA_ASSERT_DIFF_THRESHOLD`），光标闪烁误报与小高亮漏报可按场景调参，不再硬编码。
+
+上游阻塞不变：E1（executor scale_factor/能力查询）、E2（executor 批量 move）、B2（browser Python 客户端）、C1（code 视觉回喂协议）、AT1（autotest 单需求模式）仍以 issue 上报，不在本仓内修补。
+
 ## 上游依赖
 
 硬阻塞缺口以 issue 上报（不在本仓内补同源仓）：
 
-- **E1** —— `fusion-executor`：暴露 `scale_factor` / 能力查询。
-- **B2** —— `fusion-browser`：为 UDS JSON-RPC API 提供 Python 客户端。
-- **C1** —— `fusion-code`：稳定的视觉回喂协议（osagent 发 JSON，code 消费自动修复）。在此之前 `code_debug` 写本地报告 + 可选 `--visual-feedback` CLI 钩子。
-- **AT1** —— `fusion-autotest`：单需求 VLM 断言模式（当前 `vlm` 断言整份 PRD；osagent 解析 `vlm_result.json` 缺陷）。
+- **E1** —— `fusion-executor` [#43](https://github.com/dahai80/fusion-executor/issues/43)：暴露 `scale_factor` / 能力查询。
+- **E2** —— `fusion-executor` [#44](https://github.com/dahai80/fusion-executor/issues/44)：批量鼠标移动（waypoint 路径）GuiAction。
+- **B2** —— `fusion-browser` [#12](https://github.com/dahai80/fusion-browser/issues/12)：为 UDS JSON-RPC API 提供 Python 客户端。
+- **C1** —— `fusion-code` [#217](https://github.com/dahai80/fusion-code/issues/217)：稳定的视觉回喂协议（osagent 发 JSON，code 消费自动修复）。在此之前 `code_debug` 写本地报告 + 可选 `--visual-feedback` CLI 钩子。
+- **AT1** —— `fusion-autotest` [#11](https://github.com/dahai80/fusion-autotest/issues/11)：单需求 VLM 断言模式（当前 `vlm` 断言整份 PRD；osagent 解析 `vlm_result.json` 缺陷）。
 
 ## 许可证
 

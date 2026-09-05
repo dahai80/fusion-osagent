@@ -28,6 +28,22 @@ class TrajectoryConfig:
     seed: int | None = None
 
 
+def _derive_seed(seed: int | None, start: tuple[float, float], end: tuple[float, float]) -> int:
+    """N10: a fixed cfg seed (was default 7) makes EVERY click trace the
+    identical jitter shape — a strong bot fingerprint. When no explicit seed is
+    given, derive one from the start+end coords so the path still reproduces for
+    the same target (replay-friendly) but varies across different targets. An
+    explicit seed (tests / strict replay) is honored unchanged.
+    """
+    if seed is not None:
+        return seed
+    # mix coords into a stable 32-bit seed; no Math.random (Rule 5)
+    h = 1812432431
+    for v in (start[0], start[1], end[0], end[1]):
+        h = (h ^ int(round(v * 100))) * 2654435761 & 0xFFFFFFFF
+    return h
+
+
 def bezier_path(start: tuple[float, float], end: tuple[float, float], cfg: TrajectoryConfig | None = None) -> list[tuple[float, float]]:
     """Cubic Bezier from start to end with two auto-control points + jitter.
 
@@ -49,7 +65,7 @@ def bezier_path(start: tuple[float, float], end: tuple[float, float], cfg: Traje
     # two control points at t=1/3 and t=2/3, offset perpendicular
     c1 = (x0 + dx / 3 + nx * bow, y0 + dy / 3 + ny * bow)
     c2 = (x0 + 2 * dx / 3 + nx * bow * 0.5, y0 + 2 * dy / 3 + ny * bow * 0.5)
-    rng = random.Random(cfg.seed)
+    rng = random.Random(_derive_seed(cfg.seed, start, end))
     pts: list[tuple[float, float]] = []
     for i in range(cfg.steps + 1):
         t = i / cfg.steps

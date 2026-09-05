@@ -63,3 +63,29 @@ async def test_assert_changed_semantic_verify_uses_mlx():
     res = await fa.assert_changed(before, after, expected="dialog opens")
     assert res.changed is True
     assert "expected" in res.meta
+
+
+@pytest.mark.asyncio
+async def test_assert_changed_large_frame_thumbnail_diff():
+    # P3: large Retina frame (3160x1964) is downsampled before diff; the
+    # change/no-change decision must still be correct and fast.
+    cfg = OsaConfig(stub_mode=True)
+    fa = FrameAsserter(cfg, StubMlxAdapter(cfg))
+    before = Screenshot(png_b64=_png((255, 255, 255), w=3160, h=1964), width=3160, height=1964, scale_factor=2.0)
+    after = Screenshot(png_b64=_png((0, 0, 0), w=3160, h=1964), width=3160, height=1964, scale_factor=2.0)
+    res = await fa.assert_changed(before, after)
+    assert res.changed is True
+    assert res.changed_ratio > 0.5
+
+
+def test_image_cache_reuses_decoded_image():
+    # P1/P2: same b64 decodes once; second get returns the cached PIL Image.
+    from os_agent import image_cache
+
+    image_cache.clear()
+    b64 = _png((10, 20, 30))
+    img1 = image_cache.get_image(b64)
+    img2 = image_cache.get_image(b64)
+    assert img1 is img2  # same object, no re-decode
+    assert img1.size == (100, 100)
+
