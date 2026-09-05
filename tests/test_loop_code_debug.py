@@ -55,7 +55,8 @@ class FakeAgent:
 
 
 @pytest.mark.asyncio
-async def test_verify_success(tmp_path):
+async def test_verify_success(tmp_path, monkeypatch):
+    monkeypatch.setenv("OSA_REPORT_ROOT", str(tmp_path))
     agent = FakeAgent(click_ok=True, assert_ok=True)
     loop = CodeDebugLoop(OsaConfig(), agent)
     report = str(tmp_path / "fb.json")
@@ -70,7 +71,8 @@ async def test_verify_success(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_verify_click_fail_captures_frame(tmp_path):
+async def test_verify_click_fail_captures_frame(tmp_path, monkeypatch):
+    monkeypatch.setenv("OSA_REPORT_ROOT", str(tmp_path))
     agent = FakeAgent(click_ok=False, assert_ok=True)
     loop = CodeDebugLoop(OsaConfig(), agent)
     report = str(tmp_path / "fb.json")
@@ -83,7 +85,8 @@ async def test_verify_click_fail_captures_frame(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_verify_assert_fail_captures_frame(tmp_path):
+async def test_verify_assert_fail_captures_frame(tmp_path, monkeypatch):
+    monkeypatch.setenv("OSA_REPORT_ROOT", str(tmp_path))
     agent = FakeAgent(click_ok=True, assert_ok=False)
     loop = CodeDebugLoop(OsaConfig(), agent)
     report = str(tmp_path / "fb.json")
@@ -94,7 +97,8 @@ async def test_verify_assert_fail_captures_frame(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_verify_focus_fail(tmp_path):
+async def test_verify_focus_fail(tmp_path, monkeypatch):
+    monkeypatch.setenv("OSA_REPORT_ROOT", str(tmp_path))
     agent = FakeAgent(focus_ok=False)
     loop = CodeDebugLoop(OsaConfig(), agent)
     report = str(tmp_path / "fb.json")
@@ -102,6 +106,19 @@ async def test_verify_focus_fail(tmp_path):
     assert fb.ok is False
     assert "focus_app failed" in fb.reason
     assert len(agent.clicks) == 0
+
+
+@pytest.mark.asyncio
+async def test_verify_rejects_path_traversal(tmp_path, monkeypatch):
+    # D13: a report_path that escapes the allow-list root must be refused.
+    monkeypatch.setenv("OSA_REPORT_ROOT", str(tmp_path / "safe"))
+    agent = FakeAgent(click_ok=True, assert_ok=True)
+    loop = CodeDebugLoop(OsaConfig(), agent)
+    # absolute path outside the root
+    outside = str(tmp_path / "escape" / "fb.json")
+    fb = await loop.verify_and_report("Notes", "click OK", outside)
+    assert fb.ok is True  # the verify still ran
+    assert not Path(outside).is_file()  # but the report was NOT written
 
 
 @pytest.mark.asyncio

@@ -16,6 +16,8 @@ capture callable. No Math.random / wall-clock at module level (Rule 5).
 from __future__ import annotations
 
 import json
+import queue
+import threading
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 
@@ -98,30 +100,58 @@ class ManualEventSource(EventSource):
 class CGEventTapSource(EventSource):
     """Real macOS CGEventTap source. Quartz imported lazily.
 
-    Not exercised by tests (needs Accessibility TCC); kept for real capture.
+    D9 fix: the CGEventTap run loop MUST run on a dedicated thread (it blocks
+    in CFRunLoopRun). Events are pushed onto a thread-safe queue.Queue and the
+    recorder's synchronous generator drains it from the caller thread, so the
+    event stream actually yields events instead of blocking forever. A sentinel
+    None marks end-of-stream on stop(). Not exercised by tests (needs
+    Accessibility TCC); kept for real capture.
     """
 
-    def __init__(self) -> None:
+    _SENTINEL = None
+
+    def __init__(self, scale_factor: float = 2.0) -> None:
         self._tap = None
-        self._queue: list[dict] = []
+        self._q: queue.Queue[dict | None] = queue.Queue()
         self._stopped = False
+        self._thread: threading.Thread | None = None
+        self._loop = None  # CFRunLoop ref for the backend thread
+        # R4: logical-point space scale. Caller passes the real display scale
+        # (cfg.scale_factor) so a 1x external display is not divided by 2.
+        self._scale = scale_factor
 
     def events(self) -> Iterator[dict]:
+        try:
+            import Quartz  # type: ignore # noqa: F401  (availability probe)
+        except ImportError as e:
+            log.error("Quartz unavailable — cannot tap events: %s", e)
+            return
+        self._thread = threading.Thread(target=self._run_tap, name="cgeventtap", daemon=True)
+        self._thread.start()
+        log.info("CGEventTap draining from caller thread")
+        while True:
+            ev = self._q.get()
+            if ev is self._SENTINEL:
+                break
+            yield ev
+
+    def _run_tap(self) -> None:
         try:
             import Quartz  # type: ignore
             from CoreFoundation import CFRelease  # type: ignore
         except ImportError as e:
-            log.error("Quartz unavailable — cannot tap events: %s", e)
+            log.error("Quartz unavailable in tap thread: %s", e)
+            self._q.put(self._SENTINEL)
             return
 
-        scale = 2.0  # logical-point space; refined when E1 exposes scale_factor
+        scale = self._scale  # logical-point space; R4: real display scale, not hardcoded 2.0
 
         def _callback(_proxy, _type, event, _refcon):
             if self._stopped:
                 return event
             ev = self._map_event(event, scale)
             if ev:
-                self._queue.append(ev)
+                self._q.put(ev)
             return event
 
         tap = Quartz.CGEventTapCreate(
@@ -134,19 +164,20 @@ class CGEventTapSource(EventSource):
         )
         if tap is None:
             log.error("CGEventTapCreate returned None — Accessibility permission missing")
+            self._q.put(self._SENTINEL)
             return
         self._tap = tap
+        self._loop = Quartz.CFRunLoopGetCurrent()
         source = Quartz.CFMachPortCreateRunLoopSource(None, tap, 0)
-        Quartz.CFRunLoopAddSource(Quartz.CFRunLoopGetCurrent(), source, Quartz.kCFRunLoopDefaultMode)
-        log.info("CGEventTap active — run loop starting")
-        # Run loop blocks; callers iterate in a thread. Simpler: drain queue in
-        # a non-blocking loop driven by the recorder. For now we expose stop().
+        Quartz.CFRunLoopAddSource(self._loop, source, Quartz.kCFRunLoopDefaultMode)
+        log.info("CGEventTap active — run loop starting on backend thread")
         try:
             Quartz.CFRunLoopRun()
         finally:
-            Quartz.CFRunLoopStop(Quartz.CFRunLoopGetCurrent())
+            Quartz.CFRunLoopStop(self._loop)
             CFRelease(tap)
             self._tap = None
+            self._q.put(self._SENTINEL)
 
     def _map_event(self, event, scale: float) -> dict | None:
         try:
@@ -183,12 +214,14 @@ class CGEventTapSource(EventSource):
 
     def stop(self) -> None:
         self._stopped = True
-        try:
-            import Quartz  # type: ignore
+        if self._loop is not None:
+            try:
+                import Quartz  # type: ignore
 
-            Quartz.CFRunLoopStop(Quartz.CFRunLoopGetCurrent())
-        except ImportError:
-            pass
+                Quartz.CFRunLoopStop(self._loop)
+            except ImportError:
+                pass
+        self._q.put(self._SENTINEL)
 
 
 class Recorder:
@@ -240,7 +273,8 @@ class Recorder:
 
     @staticmethod
     def load(path: str) -> Recording:
-        data = json.loads(open(path).read())
+        with open(path) as fh:
+            data = json.loads(fh.read())
         steps = [
             Step(
                 seq=s["seq"],

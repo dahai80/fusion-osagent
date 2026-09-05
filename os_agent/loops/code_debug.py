@@ -11,7 +11,9 @@ invokes the `fusion-code` CLI to trigger a re-fix cycle.
 """
 from __future__ import annotations
 
+import base64
 import json
+import os
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,6 +23,32 @@ from fusion_core import get_logger
 from os_agent.config import OsaConfig
 
 log = get_logger("os_agent.loops.code_debug")
+
+
+def _report_root() -> Path:
+    # D13: report files are written under an allow-list root so a
+    # malicious/crafted report_path (LLM output is untrusted) cannot overwrite
+    # arbitrary files or write a sidecar PNG anywhere on disk. The root is
+    # overridable via OSA_REPORT_ROOT (for tests / sandboxed runs).
+    env_root = os.environ.get("OSA_REPORT_ROOT")
+    root = Path(env_root) if env_root else Path.home() / ".fusion-osagent" / "reports"
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def _safe_report_path(report_path: str) -> Path:
+    """Resolve report_path under the report root, refusing path traversal."""
+    root = _report_root()
+    p = Path(report_path)
+    if not p.is_absolute():
+        p = root / p
+    try:
+        resolved = p.resolve()
+        resolved.relative_to(root.resolve())
+    except ValueError as e:
+        log.error("code_debug report_path escapes allow-list root: %s", report_path)
+        raise ValueError(f"report_path escapes allow-list: {report_path}") from e
+    return resolved
 
 
 @dataclass
@@ -84,7 +112,18 @@ class CodeDebugLoop:
             self.write_report(fb, report_path)
             return fb
         try:
-            assertion = await self.agent.assert_changed(expected=action_query)
+            # B3: capture `before` right after the click (post-action frame) and
+            # let assert_changed capture `after` separately — otherwise the API
+            # grabs before+after back-to-back with no action between them and
+            # always reports "no change".
+            # B18: do not pass the action query ("click submit button") as the
+            # semantic `expected` — that asks the VLM whether the screenshot
+            # "matches the action", which is meaningless. Without a real
+            # expected-outcome string, fall back to pixel-diff verification
+            # only (expected=None) so we assert "something changed", not a
+            # nonsensical semantic match.
+            before = await self.agent.screenshot()
+            assertion = await self.agent.assert_changed(before=before, expected=None)
             fb.raw["assert_ok"] = assertion.ok
             fb.raw["changed_ratio"] = assertion.meta.get("changed_ratio")
             if assertion.ok:
@@ -104,22 +143,27 @@ class CodeDebugLoop:
         try:
             shot = await self.agent.screenshot()
             if shot.png_b64:
-                import base64
-
                 return base64.b64decode(shot.png_b64)
         except Exception as e:
             log.error("code_debug capture failed: %s", e)
         return None
 
     def write_report(self, fb: VisualFeedback, report_path: str) -> str:
-        Path(report_path).parent.mkdir(parents=True, exist_ok=True)
+        try:
+            safe = _safe_report_path(report_path)
+        except ValueError:
+            # path failed the allow-list check: report loudly but do not crash
+            # the whole verify loop; the feedback object still carries the verdict.
+            log.error("write_report rejected unsafe path %s — report not written", report_path)
+            return report_path
+        safe.parent.mkdir(parents=True, exist_ok=True)
         payload = fb.to_json()
         if fb.error_frame_png:
-            sidecar = str(Path(report_path).with_suffix(".error.png"))
+            sidecar = str(safe.with_suffix(".error.png"))
             Path(sidecar).write_bytes(fb.error_frame_png)
             payload["error_frame"] = sidecar
-        Path(report_path).write_text(json.dumps(payload, indent=2, ensure_ascii=False))
-        return report_path
+        safe.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+        return str(safe)
 
     def trigger_refix(self, report_path: str) -> subprocess.CompletedProcess | None:
         """Invoke fusion-code CLI to consume the feedback report and re-fix.

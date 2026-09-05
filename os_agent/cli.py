@@ -37,7 +37,9 @@ def preflight() -> int:
         check("fusion-core import", False, str(e))
 
     try:
-        check("fusion-executor import", True, "ok")
+        import fusion_executor  # noqa: F401
+
+        check("fusion-executor import", True, getattr(fusion_executor, "__file__", "ok"))
     except Exception as e:
         check("fusion-executor import", False, str(e))
 

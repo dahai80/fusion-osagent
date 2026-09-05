@@ -52,7 +52,8 @@ def _resolve_mlx_api_key() -> str:
     try:
         import json
 
-        d = json.load(open(settings))
+        with open(settings) as fh:
+            d = json.load(fh)
         key = d.get("auth", {}).get("api_key", "")
         if key:
             return key
@@ -96,7 +97,10 @@ class OsaConfig:
     stub_mode: bool = field(default_factory=lambda: _env_bool("OSA_STUB_MODE", False))
     dual_track_arbitrate: bool = field(default_factory=lambda: _env_bool("OSA_DUAL_TRACK_ARBITRATE", True))
     fast_confidence_floor: float = field(default_factory=lambda: _env_float("OSA_FAST_CONF_FLOOR", 0.5))
-    trajectory_seed: int | None = field(default_factory=lambda: _env_int("OSA_TRAJECTORY_SEED", 7) if os.environ.get("OSA_TRAJECTORY_SEED") else 7)
+    vlm_cache_ttl: float = field(default_factory=lambda: _env_float("OSA_VLM_CACHE_TTL", 3.0))  # seconds; 0 disables
+    vlm_timeout: float = field(default_factory=lambda: _env_float("OSA_VLM_TIMEOUT", 60.0))  # seconds; A2 bound on a single mlx inference
+    inspect_timeout_ms: int = field(default_factory=lambda: _env_int("OSA_INSPECT_TIMEOUT_MS", 15000))  # E5: AX tree walk needs longer than a click
+    trajectory_seed: int | None = field(default_factory=lambda: _env_int("OSA_TRAJECTORY_SEED", 7))
 
 
 def points_to_pixels(x: float, y: float, scale: float) -> tuple[float, float]:

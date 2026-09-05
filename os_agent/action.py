@@ -9,8 +9,6 @@ assert_changed so a silent no-op is never treated as success (Rule 12).
 """
 from __future__ import annotations
 
-import base64
-import io
 from dataclasses import dataclass, field
 
 from fusion_core import get_logger
@@ -62,21 +60,35 @@ class FrameAsserter:
 
     def _diff_ratio(self, a_b64: str, b_b64: str) -> float:
         try:
-            ia = Image.open(io.BytesIO(base64.b64decode(a_b64))).convert("RGB")
-            ib = Image.open(io.BytesIO(base64.b64decode(b_b64))).convert("RGB")
+            from os_agent import image_cache
+
+            ia = image_cache.get_image(a_b64)
+            ib = image_cache.get_image(b_b64)
             if ia.size != ib.size:
                 log.info("diff: size mismatch %s vs %s — resize compare", ia.size, ib.size)
-                ib = ib.resize(ia.size)
+                ib = ib.resize(ia.size, Image.LANCZOS)
+            # P3: downsample to a 256px-wide thumbnail before diff. Large Retina
+            # frames (3160x1964) cost tens of ms per full-res histogram; the
+            # change/no-change decision is stable at thumbnail resolution and
+            # the ratio is preserved (both frames scaled identically).
+            THUMB_W = 256
+            if ia.size[0] > THUMB_W:
+                scale = THUMB_W / ia.size[0]
+                ia = ia.resize((THUMB_W, max(1, int(ia.size[1] * scale))), Image.LANCZOS)
+                ib = ib.resize(ia.size, Image.LANCZOS)
             diff = ImageChops.difference(ia, ib)
-            bbox = diff.getbbox()
-            if bbox is None:
+            if diff.getbbox() is None:
                 return 0.0
-            hist = diff.convert("L").getextrema()
-            if hist[0] == hist[1] == 0:
-                return 0.0
-            bbox_area = (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
+            # D7: count the actual changed pixels via the grayscale histogram,
+            # not the bounding-box area. A tiny change inside a large bbox was
+            # grossly over-counted before (e.g. a 10px cursor move reported as
+            # a 50% frame change). Non-zero luminance bins = changed pixels.
+            hist = diff.convert("L").histogram()  # 256 bins, index = luminance
             total = ia.size[0] * ia.size[1]
-            return min(1.0, bbox_area / total) if total else 0.0
+            if not total:
+                return 0.0
+            changed_px = sum(hist[1:])  # bin 0 = identical pixels
+            return min(1.0, changed_px / total)
         except Exception as e:
             log.error("diff compute failed: %s", e)
             return 0.0
@@ -89,14 +101,18 @@ class FrameAsserter:
         )
         try:
             data = await self.mlx.chat_json(prompt, after.png_b64)
-            match = bool(data.get("match", False))
-            return FrameAssertion(
-                ok=match,
-                changed=True,
-                changed_ratio=ratio,
-                meta={"expected": expected, "reason": data.get("reason")},
-                error=None if match else "semantic mismatch",
-            )
         except Exception as e:
-            log.warning("semantic verify failed: %s — trust pixel diff", e)
-            return FrameAssertion(ok=True, changed=True, changed_ratio=ratio, meta={"expected": expected, "verify_error": str(e)})
+            # D7 fail-loud: a verifier exception must NOT be masked as success.
+            log.warning("semantic verify failed: %s — fail-loud (ok=False)", e)
+            return FrameAssertion(ok=False, changed=True, changed_ratio=ratio, error=f"verify error: {e}", meta={"expected": expected, "verify_error": str(e)})
+        if data is None:
+            log.warning("semantic verify: non-JSON response — fail-loud (ok=False)")
+            return FrameAssertion(ok=False, changed=True, changed_ratio=ratio, error="verify error: non-JSON", meta={"expected": expected})
+        match = bool(data.get("match", False))
+        return FrameAssertion(
+            ok=match,
+            changed=True,
+            changed_ratio=ratio,
+            meta={"expected": expected, "reason": data.get("reason")},
+            error=None if match else "semantic mismatch",
+        )

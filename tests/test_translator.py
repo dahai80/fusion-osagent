@@ -11,15 +11,27 @@ def _rec(events):
     return Recorder(ManualEventSource(events), capture=lambda: None, clock=lambda: 0.0).record()
 
 
-def test_click_translates_to_visual_guard():
+def test_click_translates_to_point_guard_without_describer():
+    # D11: without a describer there is no element description to re-locate by,
+    # so the guard degrades to "point" (replay the recorded coord) rather than
+    # claiming a visual guard that can never be satisfied.
     rec = _rec([{"kind": "click", "at": [100.0, 200.0], "button": "left"}])
     script = Translator().translate(rec)
     assert len(script.steps) == 1
     s = script.steps[0]
     assert s.verb == "click"
-    assert s.guard_kind == "visual"
+    assert s.guard_kind == "point"
     assert s.action["at"] == [100.0, 200.0]
     assert s.action["button"] == "left"
+
+
+def test_click_translates_to_visual_guard_with_describer():
+    rec = _rec([{"kind": "click", "at": [100.0, 200.0], "button": "left"}])
+    rec.steps[0].screenshot_b64 = "PNG"
+    script = Translator(describer=lambda b64: "the Submit button").translate(rec)
+    s = script.steps[0]
+    assert s.guard_kind == "visual"
+    assert s.target_desc == "the Submit button"
 
 
 def test_key_translates_to_none_guard_with_modifiers():

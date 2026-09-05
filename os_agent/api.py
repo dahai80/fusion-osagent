@@ -10,6 +10,7 @@ dual-track for locate. Frame assertion / healing land Phase 1.
 """
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass, field
 
@@ -93,6 +94,11 @@ class DesktopAgent:
     async def click_by(self, query: str) -> ActionResult:
         t0 = time.monotonic()
         pr = await self.perception.locate(query)
+        if pr.locator.x is None or pr.locator.y is None:
+            ms = int((time.monotonic() - t0) * 1000)
+            err = pr.locator.raw.get("error", "locate failed")
+            log.warning("click_by: no coordinates for %r (%s)", query, err)
+            return ActionResult(ok=False, action="click_by", track=pr.track, latency_ms=ms, error=err, meta={"query": query, "confidence": pr.confidence})
         res = await self.executor.click(pr.locator, button="left")
         ms = int((time.monotonic() - t0) * 1000)
         return ActionResult(ok=res.get("ok", False), action="click_by", track=pr.track, latency_ms=ms, error=res.get("error"), meta={"query": query, "confidence": pr.confidence})
@@ -116,8 +122,21 @@ class DesktopAgent:
         return await self._act_raw("wait", lambda: self.executor.wait(seconds))
 
     async def assert_changed(self, before: Screenshot | None = None, expected: str | None = None) -> ActionResult:
-        """Post-action frame assertion: diff before/after, optional VLM semantic verify."""
-        before = before or await self.perception.capture(prefer_ax=False)
+        """Post-action frame assertion: diff before/after, optional VLM semantic verify.
+
+        A3: `before` is mandatory. The old `before = before or capture()` fallback
+        captured before+after back-to-back with no action between them, so the
+        pixel diff was always 0 and the assertion always reported "no change"
+        — a constant false negative that broke self-heal/replay decisions for
+        any caller that did not pass an explicit before frame.
+        """
+        if before is None:
+            log.error("assert_changed: missing `before` frame — refusing back-to-back capture")
+            return ActionResult(
+                ok=False,
+                action="assert",
+                error="assert_changed requires an explicit `before` frame captured before the action",
+            )
         after = await self.perception.capture(prefer_ax=False)
         fa = await self.asserter.assert_changed(before, after, expected=expected)
         log.info("assert_changed: ok=%s ratio=%.5f err=%s", fa.ok, fa.changed_ratio, fa.error)
@@ -175,11 +194,14 @@ class DesktopAgent:
         )
 
     async def close(self) -> None:
-        await self.executor.close()
-        await self.mlx.close()
+        closes = [self.executor.close(), self.mlx.close()]
         if self.browser:
-            await self.browser.close()
-        await self.studio.close()
+            closes.append(self.browser.close())
+        closes.append(self.studio.close())
+        results = await asyncio.gather(*closes, return_exceptions=True)
+        for i, r in enumerate(results):
+            if isinstance(r, Exception):
+                log.warning("close[%d] raised: %s", i, r)
         log.info("DesktopAgent closed")
 
     async def _act(self, action: str, loc: Locator, **kw) -> ActionResult:

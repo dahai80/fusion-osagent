@@ -3,9 +3,15 @@
 Endpoint http://localhost:11434 (OpenAI-compatible), api key dahai168.
 Fast/Slow dual-core model selection lives in reasoning.py; this adapter is a
 thin inference wrapper returning raw text/JSON for a given image+prompt.
+
+JSON extraction is fail-loud (D5 fix): chat_json returns None when the model
+output cannot be parsed, so callers distinguish "no answer" from a legitimate
+empty object and never silently click (0,0). The stub mirrors the real adapter's
+contract so tests exercise the real parsing path.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 
 from fusion_core import FusionMLXClient, get_logger
@@ -41,24 +47,33 @@ class MlxAdapter:
             {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{image_b64}"}},
         ]
         try:
-            resp = await client.chat(messages=[{"role": "user", "content": content}], model=use_model)
+            # A2: bound the inference so a stuck mlx (model load / OOM / GPU
+            # stall) cannot hang the Agent loop forever. Re-raise on timeout so
+            # callers (fail-loud) treat it as a failed inference, not a silent
+            # default coordinate.
+            resp = await asyncio.wait_for(
+                client.chat(messages=[{"role": "user", "content": content}], model=use_model),
+                timeout=self.cfg.vlm_timeout,
+            )
             return resp.content.strip()
-        except Exception as e:
-            log.error("mlx vision chat failed: %s", e)
+        except TimeoutError:
+            log.error("mlx vision chat timed out after %.1fs model=%s", self.cfg.vlm_timeout, use_model)
+            raise
+        except Exception:
+            log.exception("mlx vision chat failed")
             raise
 
-    async def chat_json(self, prompt: str, image_b64: str, model: str | None = None) -> dict:
+    async def chat_json(self, prompt: str, image_b64: str, model: str | None = None) -> dict | None:
+        """Return parsed JSON dict, or None if the model output is not valid JSON.
+
+        None (not {}) is the fail-loud signal: callers must treat None as a
+        failed inference and never use a default coordinate.
+        """
         raw = await self.chat_vision(prompt, image_b64, model)
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start < 0 or end < 0:
+        obj = _extract_json(raw)
+        if obj is None:
             log.warning("mlx returned non-JSON: %s", raw[:200])
-            return {}
-        try:
-            return json.loads(raw[start : end + 1])
-        except json.JSONDecodeError as e:
-            log.warning("mlx JSON parse failed: %s raw=%s", e, raw[:200])
-            return {}
+        return obj
 
     async def health(self) -> bool:
         try:
@@ -69,8 +84,79 @@ class MlxAdapter:
             return False
 
     async def close(self) -> None:
+        client = self._client
         self._client = None
+        if client is not None and hasattr(client, "aclose"):
+            try:
+                await client.aclose()
+            except Exception as e:
+                log.warning("mlx client close raised: %s", e)
+        elif client is not None and hasattr(client, "close"):
+            try:
+                client.close()
+            except Exception as e:
+                log.warning("mlx client close raised: %s", e)
         log.info("mlx adapter closed")
+
+
+def _extract_json(raw: str) -> dict | None:
+    """Robust balanced-brace JSON extraction. Returns None on failure.
+
+    R1: real VL models (esp. 7B fast) often prefix prose like "Sure, for
+    {reason} here is the JSON: ```json\\n{...}\\n```". Taking the first '{'
+    lands inside the prose and the balanced-brace candidate is not valid JSON
+    -> None -> fail-loud -> permanent force-escalate to slow. Prefer a fenced
+    ```json ... ``` block when present, then fall back to the first '{'.
+    """
+    if not raw:
+        return None
+    fenced = _extract_fenced_json(raw)
+    if fenced is not None:
+        return fenced
+    start = raw.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_str = False
+    esc = False
+    for i in range(start, len(raw)):
+        ch = raw[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                candidate = raw[start : i + 1]
+                try:
+                    parsed = json.loads(candidate)
+                    return parsed if isinstance(parsed, dict) else None
+                except json.JSONDecodeError:
+                    return None
+    return None
+
+
+def _extract_fenced_json(raw: str) -> dict | None:
+    """Parse the first ```json ... ``` (or bare ``` ... ```) fenced block."""
+    import re
+
+    m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", raw, re.DOTALL)
+    if m is None:
+        return None
+    try:
+        parsed = json.loads(m.group(1))
+        return parsed if isinstance(parsed, dict) else None
+    except json.JSONDecodeError:
+        return None
 
 
 class StubMlxAdapter:
@@ -85,13 +171,18 @@ class StubMlxAdapter:
     async def chat_vision(self, prompt: str, image_b64: str, model: str | None = None) -> str:
         rec = {"prompt": prompt[:120], "model": model or self.model}
         self.calls.append(rec)
-        if "coordinate" in prompt.lower() or "click" in prompt.lower():
+        low = prompt.lower()
+        # grounding/locate prompt -> return a normalized coordinate
+        if "grounding model" in low or "normalized fractions" in low or "find the element" in low:
+            return json.dumps({"x": 0.5, "y": 0.5, "confidence": 0.9, "label": "stub-target"})
+        # fast action prompt -> a routine click
+        if "coordinate" in low or "click" in low:
             return json.dumps({"x": 0.5, "y": 0.5, "action": "click", "confidence": 0.9})
         return json.dumps({"action": "none", "reason": "stub"})
 
-    async def chat_json(self, prompt: str, image_b64: str, model: str | None = None) -> dict:
+    async def chat_json(self, prompt: str, image_b64: str, model: str | None = None) -> dict | None:
         raw = await self.chat_vision(prompt, image_b64, model)
-        return json.loads(raw) if raw.startswith("{") else {}
+        return _extract_json(raw)
 
     async def health(self) -> bool:
         return True

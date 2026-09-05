@@ -112,3 +112,56 @@ async def test_fast_error_forces_escalate():
     assert reason.core == "slow"
     assert reason.action == "halt"
     assert reason.escalated is True
+
+
+@pytest.mark.asyncio
+async def test_vlm_cache_skips_redundant_inference():
+    # P5/B4: same query + same screenshot twice within TTL -> mlx called once.
+    mlx = FakeMlx(fast_resp={"action": "click", "target": "OK", "confidence": 0.9, "unknown_dialog": False})
+    r = Reasoner(OsaConfig(), mlx, SomAnnotator(OsaConfig()))
+    try:
+        await r.decide("click OK button", _shot())
+        await r.decide("click OK button", _shot())  # identical inputs -> cache hit
+        assert len(mlx.calls) == 1
+        assert r.vlm_cache.hits == 1
+    finally:
+        await mlx.close()
+
+
+@pytest.mark.asyncio
+async def test_vlm_cache_miss_on_changed_screenshot():
+    # different screenshot -> different image hash -> cache miss -> re-infer.
+    # Use a non-1x1 image so the fail-closed blur does not collapse two distinct
+    # inputs to the same blurred output (which would make the cache key collide
+    # and turn a real miss into a false hit).
+    import base64
+    import io
+
+    from PIL import Image
+
+    def _colored_png(color):
+        buf = io.BytesIO()
+        Image.new("RGB", (200, 200), color).save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode()
+
+    mlx = FakeMlx(fast_resp={"action": "click", "target": "OK", "confidence": 0.9, "unknown_dialog": False})
+    r = Reasoner(OsaConfig(), mlx, SomAnnotator(OsaConfig()))
+    try:
+        s1 = Screenshot(png_b64=_colored_png((255, 0, 0)), width=200, height=200, scale_factor=2.0, node_tree=None)
+        s2 = Screenshot(png_b64=_colored_png((0, 0, 255)), width=200, height=200, scale_factor=2.0, node_tree=None)
+        await r.decide("click OK button", s1)
+        await r.decide("click OK button", s2)
+        assert len(mlx.calls) == 2
+    finally:
+        await mlx.close()
+
+
+def test_vlm_cache_disabled_when_ttl_zero():
+    from os_agent.vlm_cache import VlmCache
+
+    c = VlmCache(ttl=0.0)
+    c.put("m", "p", "img", {"a": 1})
+    val, hit = c.get("m", "p", "img")
+    assert hit is False
+    assert val is None
+
