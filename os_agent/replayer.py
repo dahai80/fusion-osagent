@@ -137,8 +137,12 @@ class Replayer:
         if ledger:
             report.meta["idempotency_key"] = idempotency_key
         for step in recording.steps:
-            if ledger is not None and ledger.is_done(step.seq):
-                log.info("replay-recording step %d: skipped (already done)", step.seq)
+            # GA-4: claim the seq atomically BEFORE executing, mirroring
+            # replay_script. The old is_done→execute→mark_done window let a
+            # concurrent replay with the same key double-execute a mutating
+            # fixed-coord step (double-click/submit). claim() closes it.
+            if ledger is not None and not ledger.claim(step.seq):
+                log.info("replay-recording step %d: skipped (already claimed/done, idempotent resume)", step.seq)
                 report.results.append(
                     StepResult(seq=step.seq, verb=step.kind, ok=True, guard_kind="point", error="skipped: already done")
                 )

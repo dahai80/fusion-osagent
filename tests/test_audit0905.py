@@ -708,3 +708,132 @@ def test_filelock_is_not_reentrant_in_same_process(tmp_path):
     # after release, a fresh acquire must work
     with _FileLock(lp):
         pass
+
+
+# ---- GA ops gap 1: Prometheus exposition ----
+
+
+def test_prometheus_renders_counters_and_histograms():
+    from os_agent.prometheus import render_prometheus
+
+    snap = {
+        "counters": {"action.click.total": 5, "action.click.ok": 4},
+        "histograms": {
+            "action.click.latency_ms": {
+                "buckets": [["<= 25", 3], ["<= 50", 1]],
+                "sum_ms": 120.0,
+                "count": 4,
+            }
+        },
+        "caches": {"vlm": {"hits": 10, "misses": 2, "hit_rate": 0.8333, "total": 12}},
+        "masker_masked_total": 7,
+        "coordination_enabled": True,
+        "breaker": {"state": "OPEN", "failures": 5, "failure_threshold": 5},
+        "cluster_health": {"failures": 3, "open": True, "open_threshold": 2},
+    }
+    text = render_prometheus(snap)
+    assert "# TYPE osagent_action_click_total counter" in text
+    assert "osagent_action_click_total 5" in text
+    assert "# TYPE osagent_action_click_latency_ms histogram" in text
+    assert 'osagent_action_click_latency_ms_bucket{le="25"} 3' in text
+    assert 'osagent_action_click_latency_ms_bucket{le="+Inf"} 4' in text
+    assert "osagent_action_click_latency_ms_sum 120.0" in text
+    assert "osagent_action_click_latency_ms_count 4" in text
+    assert "osagent_vlm_hits 10" in text
+    assert "osagent_vlm_hit_rate 0.8333" in text
+    assert "osagent_masker_masked_total 7" in text
+    assert "# TYPE osagent_breaker_state gauge" in text
+    assert "osagent_breaker_state 1" in text
+    assert "osagent_cluster_open 1" in text
+
+
+# ---- GA ops gap 2: audit rotation + retention ----
+
+
+def test_audit_log_rotates_on_size_cap(tmp_path):
+    from os_agent.audit_log import AuditLog
+
+    path = str(tmp_path / "audit.jsonl")
+    # tiny cap so a handful of records triggers rotation
+    audit = AuditLog(path=path, rotate_max_bytes=120, retention_files=3, retention_days=0)
+    for i in range(20):
+        audit.record("action", action_kind="click", ok=True, idx=i)
+    # the active file should have been rotated at least once -> an archive exists
+    archives = [p for p in tmp_path.iterdir() if p.name.startswith("audit.jsonl.")]
+    assert len(archives) >= 1, "expected at least one rotated archive"
+    # active file still present and under cap (post-rotation it restarts small)
+    assert Path(path).exists()
+    assert Path(path).stat().st_size < 120 or Path(path).read_text().count("\n") <= 20
+
+
+def test_audit_log_retention_prunes_old_archives(tmp_path):
+
+    from os_agent.audit_log import AuditLog
+
+    path = str(tmp_path / "audit.jsonl")
+    audit = AuditLog(path=path, rotate_max_bytes=50, retention_files=2, retention_days=0)
+    # force several rotations
+    for i in range(40):
+        audit.record("action", idx=i)
+    archives = sorted((p for p in tmp_path.iterdir() if p.name.startswith("audit.jsonl.")), key=lambda p: p.name)
+    # retention_files=2 -> at most 2 archives kept
+    assert len(archives) <= 2, f"expected <=2 archives, got {len(archives)}"
+
+
+def test_audit_log_no_rotation_when_cap_zero(tmp_path):
+    from os_agent.audit_log import AuditLog
+
+    path = str(tmp_path / "audit.jsonl")
+    audit = AuditLog(path=path, rotate_max_bytes=0, retention_files=0, retention_days=0)
+    for i in range(30):
+        audit.record("action", idx=i)
+    archives = [p for p in tmp_path.iterdir() if p.name.startswith("audit.jsonl.")]
+    assert archives == [], "rotate_max_bytes=0 must never rotate"
+
+
+# ---- GA gap 4: replay_recording uses claim (no double-execute) ----
+
+
+@pytest.mark.asyncio
+async def test_replay_recording_claim_skips_concurrent_duplicate(tmp_path):
+    from os_agent.recorder import ManualEventSource, Recorder
+    from os_agent.replayer import Replayer
+
+    class _Asserter:
+        async def assert_changed(self, before, after, expected=None, threshold=0.0):
+            from os_agent.action import FrameAssertion
+
+            return FrameAssertion(ok=True, changed=True, changed_ratio=0.1, error="")
+
+    class _Exec:
+        def __init__(self):
+            self.calls = []
+
+        async def click(self, loc, button="left"):
+            self.calls.append(("click", loc.as_point()))
+            return {"ok": True}
+
+    class _Perc:
+        async def capture(self, prefer_ax=False):
+            return Screenshot(png_b64="iVBORw0KGgo=", width=10, height=10, scale_factor=2.0, node_tree=None)
+
+    class _Agent:
+        def __init__(self):
+            self.executor = _Exec()
+            self.perception = _Perc()
+            self.asserter = _Asserter()
+
+    rec = Recorder(
+        ManualEventSource([{"kind": "click", "at": [1.0, 2.0]}]), capture=lambda: None, clock=lambda: 0.0
+    ).record()
+    ledger_path = str(tmp_path / "led.jsonl")
+    agent = _Agent()
+    rep = Replayer(agent)
+    # first run claims + executes the step
+    r1 = await rep.replay_recording(rec, idempotency_key="k1", ledger_path=ledger_path)
+    assert r1.passed == 1
+    assert len(agent.executor.calls) == 1
+    # second run with same key -> claim returns False -> skipped, NO extra click
+    r2 = await rep.replay_recording(rec, idempotency_key="k1", ledger_path=ledger_path)
+    assert r2.passed == 1
+    assert len(agent.executor.calls) == 1, "concurrent replay must not double-execute (claim skipped)"

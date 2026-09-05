@@ -45,12 +45,24 @@ class AuditLog:
     runs). A real path persists each entry to JSONL under a lock.
     """
 
-    def __init__(self, path: str | None = None, agent_id: str = "osagent", buffer_max: int = 10000) -> None:
+    def __init__(
+        self,
+        path: str | None = None,
+        agent_id: str = "osagent",
+        buffer_max: int = 10000,
+        rotate_max_bytes: int = 0,
+        retention_files: int = 0,
+        retention_days: int = 0,
+    ) -> None:
         self.path = path
         self.agent_id = agent_id
         self._lock = threading.Lock()
         self._buffer: list[AuditEntry] = []
         self._buffer_max = buffer_max
+        # GA ops: rotation + retention bounds. 0 = that bound disabled.
+        self._rotate_max_bytes = rotate_max_bytes
+        self._retention_files = retention_files
+        self._retention_days = retention_days
         if path:
             # fail-open: an unwritable/readonly audit path must never prevent
             # the agent from starting. Directory creation + writes happen under
@@ -71,6 +83,11 @@ class AuditLog:
                 try:
                     with open(self.path, "a", encoding="utf-8") as fh:
                         fh.write(entry.to_jsonl() + "\n")
+                    # GA ops: rotate after the write if the active file exceeded
+                    # the size cap. Rotation is best-effort: a failure logs but
+                    # never breaks the action path (fail-open, same as the write).
+                    if self._rotate_max_bytes > 0:
+                        self._maybe_rotate_locked()
                 except OSError as e:
                     # fail-open: never break the action path over an audit write
                     log.error("audit log write failed: %s (entry kind=%s)", e, kind)
@@ -122,6 +139,63 @@ class AuditLog:
         except OSError as e:
             log.error("audit log disk query failed: %s", e)
         return out
+
+    def _maybe_rotate_locked(self) -> None:
+        # GA ops: rotate the active JSONL to a timestamped archive when it
+        # exceeds rotate_max_bytes, then prune archives by count + age. Called
+        # under self._lock (held by record). time.time() is fine here — this is
+        # runtime, not module load; the no-wall-clock rule is about deterministic
+        # module-level values, and rotation is inherently wall-clock driven.
+        try:
+            if not self.path or not os.path.exists(self.path):
+                return
+            if os.path.getsize(self.path) < self._rotate_max_bytes:
+                return
+            base = self.path
+            ts = time.strftime("%Y%m%d-%H%M%S")
+            rotated = f"{base}.{ts}"
+            os.rename(self.path, rotated)
+            # truncate the active file (rename moved it; recreate empty)
+            open(self.path, "a", encoding="utf-8").close()
+            log.info("audit log rotated: %s -> %s", self.path, rotated)
+            self._prune_archives_locked(base)
+        except OSError as e:
+            log.warning("audit log rotation failed: %s", e)
+
+    def _prune_archives_locked(self, base: str) -> None:
+        # Retention: keep at most retention_files archives; drop any older than
+        # retention_days. Archives match f"{base}.*" (timestamped). Sort by mtime.
+        if self._retention_files <= 0 and self._retention_days <= 0:
+            return
+        try:
+            parent = os.path.dirname(base) or "."
+            name = os.path.basename(base)
+            archives = []
+            for fn in os.listdir(parent):
+                if fn.startswith(name + "."):
+                    full = os.path.join(parent, fn)
+                    if os.path.isfile(full):
+                        archives.append(full)
+            if not archives:
+                return
+            archives.sort(key=lambda p: os.path.getmtime(p))
+            now = time.time()
+            dropped = 0
+            for full in archives:
+                drop = False
+                if self._retention_files > 0 and len(archives) - dropped > self._retention_files:
+                    drop = True
+                if self._retention_days > 0 and (now - os.path.getmtime(full)) > self._retention_days * 86400:
+                    drop = True
+                if drop:
+                    try:
+                        os.remove(full)
+                        dropped += 1
+                        log.info("audit archive pruned (retention): %s", full)
+                    except OSError as e:
+                        log.warning("audit archive prune failed: %s (%s)", e, full)
+        except OSError as e:
+            log.warning("audit archive retention scan failed: %s", e)
 
     def count(self) -> int:
         with self._lock:
