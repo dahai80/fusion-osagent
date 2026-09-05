@@ -17,6 +17,7 @@ identical call skip inference for a few seconds. ttl=0 disables the cache.
 from __future__ import annotations
 
 import hashlib
+import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -39,6 +40,7 @@ class VlmCache:
         self.ttl = ttl
         self._max = max_entries
         self._store: OrderedDict[tuple, _Entry] = OrderedDict()
+        self._lock = threading.Lock()
         self.hits = 0
         self.misses = 0
 
@@ -53,32 +55,40 @@ class VlmCache:
     def get(self, model: str, prompt: str, image_b64: str) -> tuple[dict | None, bool]:
         """Return (value, hit). hit=False means caller must infer."""
         if self.ttl <= 0:
-            self.misses += 1
+            with self._lock:
+                self.misses += 1
             return None, False
         k = self._key(model, prompt, image_b64)
-        entry = self._store.get(k)
-        if entry is None:
-            self.misses += 1
-            return None, False
-        if time.monotonic() > entry.expires_at:
-            self._store.pop(k, None)
-            self.misses += 1
-            return None, False
-        self._store.move_to_end(k)
-        self.hits += 1
-        log.info("vlm cache HIT (model=%s hits=%d misses=%d)", model, self.hits, self.misses)
-        return entry.value, True
+        with self._lock:
+            entry = self._store.get(k)
+            if entry is None:
+                self.misses += 1
+                return None, False
+            if time.monotonic() > entry.expires_at:
+                self._store.pop(k, None)
+                self.misses += 1
+                return None, False
+            self._store.move_to_end(k)
+            self.hits += 1
+            log.info("vlm cache HIT (model=%s hits=%d misses=%d)", model, self.hits, self.misses)
+            return entry.value, True
 
     def put(self, model: str, prompt: str, image_b64: str, value: dict | None) -> None:
         if self.ttl <= 0:
             return
         k = self._key(model, prompt, image_b64)
-        self._store[k] = _Entry(value=value, expires_at=time.monotonic() + self.ttl)
-        self._store.move_to_end(k)
-        if len(self._store) > self._max:
-            self._store.popitem(last=False)
+        with self._lock:
+            self._store[k] = _Entry(value=value, expires_at=time.monotonic() + self.ttl)
+            self._store.move_to_end(k)
+            if len(self._store) > self._max:
+                self._store.popitem(last=False)
 
     def clear(self) -> None:
-        self._store.clear()
-        self.hits = 0
-        self.misses = 0
+        with self._lock:
+            self._store.clear()
+            self.hits = 0
+            self.misses = 0
+
+    def stats(self) -> dict:
+        with self._lock:
+            return {"hits": self.hits, "misses": self.misses, "entries": len(self._store)}

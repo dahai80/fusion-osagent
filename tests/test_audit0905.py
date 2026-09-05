@@ -217,3 +217,147 @@ def test_browser_adapter_constructs_with_lock():
     cfg = OsaConfig(stub_mode=True)
     br = BrowserAdapter(cfg)
     assert br._rpc_lock is not None
+
+
+# E4: reasoner + perception must share ONE masker instance (was two).
+@pytest.mark.asyncio
+async def test_shared_masker_single_instance():
+    agent = DesktopAgent(OsaConfig(stub_mode=True))
+    try:
+        assert agent.reasoner.masker is agent.perception.masker
+        assert agent.reasoner.masker is agent.masker
+    finally:
+        await agent.close()
+
+
+# A2: planner must bound total heal cycles so a flapping target cannot loop
+# heal forever.
+@pytest.mark.asyncio
+async def test_planner_max_heal_cycles_bounds_loop():
+    from os_agent.planner import Plan, Planner, PlanStatus, Step
+
+    planner = Planner(max_retries=1, max_heal_cycles=2)
+    plan = Plan(name="t", steps=[Step(name="s1", action="click")])
+
+    attempts = {"n": 0}
+
+    async def capture():
+        return Screenshot(png_b64=None, width=None, height=None, scale_factor=2.0, node_tree=None)
+
+    async def execute(step, shot, p):
+        attempts["n"] += 1
+        return False  # always fails -> heal every time
+
+    heal_calls = {"n": 0}
+
+    async def heal(p, shot):
+        heal_calls["n"] += 1
+        return True  # claims healed, but next attempt still fails -> flapping
+
+    await planner.run(plan, capture, execute, heal=heal)
+    # must stop at max_heal_cycles, not loop forever
+    assert heal_calls["n"] <= 2
+    assert plan.status != PlanStatus.DONE
+
+
+# N5: Fast core must skip to Slow when no AX tree (fail-closed blur makes the
+# Fast image illegible -> would permanently return "none" and always escalate
+# anyway, but only after a wasted VLM call).
+@pytest.mark.asyncio
+async def test_fast_skips_on_no_ax_tree():
+    from os_agent.reasoning import Reasoner
+    from os_agent.som import SomAnnotator
+
+    cfg = OsaConfig(stub_mode=True)
+    agent = DesktopAgent(cfg)
+    try:
+        mlx_calls = {"n": 0}
+        orig = agent.mlx.chat_json
+
+        async def counting_chat(prompt, image_b64, model=None):
+            mlx_calls["n"] += 1
+            return await orig(prompt, image_b64, model=model)
+
+        agent.mlx.chat_json = counting_chat
+        shot = Screenshot(png_b64=agent.executor._shot, width=1440, height=900, scale_factor=2.0, node_tree=None)
+        reasoner = Reasoner(cfg, agent.mlx, SomAnnotator(cfg), masker=agent.masker)
+        proposal = await reasoner._fast_propose("click OK", shot)
+        assert proposal.action == "none"
+        assert proposal.unknown_dialog is True
+        # Fast must NOT have called the VLM on an illegible blurred frame
+        assert mlx_calls["n"] == 0
+    finally:
+        await agent.close()
+
+
+# N9: click_humanlike must start from the tracked cursor position, not (0,0),
+# and update it after the click.
+@pytest.mark.asyncio
+async def test_click_humanlike_tracks_cursor():
+    agent = DesktopAgent(OsaConfig(stub_mode=True))
+    try:
+        assert agent._cursor_pos == (0.0, 0.0)
+        await agent.click_humanlike(100.0, 200.0)
+        assert agent._cursor_pos == (100.0, 200.0)
+        # second click starts from the previous target, not (0,0)
+        await agent.click_humanlike(300.0, 400.0)
+        assert agent._cursor_pos == (300.0, 400.0)
+        # the move_path call must have received a path starting at `before`
+        last_move = [c for c in agent.executor.calls if c.get("kind") == "hover"]
+        assert last_move, "move_path should have emitted hover waypoints"
+    finally:
+        await agent.close()
+
+
+# N10: bezier_path with no explicit seed must vary across different targets
+# (per-target derived seed), while the same target reproduces the same path.
+def test_bezier_path_seed_varies_per_target():
+    from os_agent.trajectory import TrajectoryConfig, bezier_path
+
+    cfg = TrajectoryConfig(seed=None)
+    p_a1 = bezier_path((0, 0), (100, 100), cfg)
+    p_a2 = bezier_path((0, 0), (100, 100), cfg)
+    p_b = bezier_path((0, 0), (200, 200), cfg)
+    # same target -> reproducible (replay-friendly)
+    assert p_a1 == p_a2
+    # different target -> different jitter shape (not a fixed bot fingerprint)
+    assert p_a1 != p_b
+
+
+# E6: translate_async must offload a blocking describer to a thread (does not
+# block) and still produce a visual guard when the describer returns text.
+@pytest.mark.asyncio
+async def test_translate_async_offloads_describer():
+    from os_agent.recorder import Recording, Step
+    from os_agent.translator import Translator
+
+    block = {"called": False}
+
+    def slow_describer(png_b64):
+        block["called"] = True
+        return "the OK button"
+
+    rec = Recording(
+        steps=[Step(seq=1, kind="click", at=[10.0, 20.0], button="left", screenshot_b64="img")],
+        meta={},
+    )
+    tr = Translator(describer=slow_describer)
+    script = await tr.translate_async(rec)
+    assert block["called"] is True
+    assert script.steps[0].guard_kind == "visual"
+    assert script.steps[0].target_desc == "the OK button"
+
+
+# R4: assert_changed threshold must come from config when not passed explicitly.
+def test_assert_diff_threshold_configurable():
+    cfg = OsaConfig(stub_mode=True)
+    assert cfg.assert_diff_threshold == 0.002
+    # env override path
+    import os
+
+    os.environ["OSA_ASSERT_DIFF_THRESHOLD"] = "0.05"
+    try:
+        cfg2 = OsaConfig(stub_mode=True)
+        assert cfg2.assert_diff_threshold == 0.05
+    finally:
+        del os.environ["OSA_ASSERT_DIFF_THRESHOLD"]

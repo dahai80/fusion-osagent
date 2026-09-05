@@ -89,22 +89,57 @@ def parse(node_tree: str | None) -> AxNode | None:
     except json.JSONDecodeError as e:
         log.warning("ax parse failed: %s", e)
         return None
-    return _from_dict(tree)
+    if not isinstance(tree, dict):
+        log.warning("ax parse: top-level not a dict")
+        return None
+    try:
+        return _from_dict_iter(tree)
+    except RecursionError:
+        log.error("ax parse: RecursionError on deeply-nested tree — returning None (fail-closed)")
+        return None
 
 
-def _from_dict(d: dict) -> AxNode:
+def _node_from_dict(d: dict) -> AxNode:
     frame = d.get("frame") or d.get("position") or d.get("ax_frame")
     frame = [float(v) for v in frame] if frame and len(frame) >= 4 else None
-    node = AxNode(
+    return AxNode(
         role=str(d.get("role") or "").lower(),
         label=str(d.get("label") or ""),
         title=str(d.get("title") or ""),
         frame=frame,
         identifier=d.get("identifier") or d.get("ax_identifier"),
     )
-    for child in d.get("children") or []:
-        node.children.append(_from_dict(child))
-    return node
+
+
+def _from_dict_iter(root_d: dict, max_nodes: int = MAX_NODES) -> AxNode:
+    """Iterative AX tree build with a hard node cap.
+
+    Recursive _from_dict crashed with RecursionError on a deeply-nested
+    Electron/Web AX tree (depth > ~1000), which escaped the parse() try
+    block (it only caught JSONDecodeError) and crashed the fail-closed
+    masking path. Iterative stack build + cap is depth-safe.
+    """
+    new_root = _node_from_dict(root_d)
+    count = 1
+    stack: list[tuple[dict, AxNode]] = [(root_d, new_root)]
+    while stack:
+        d, parent = stack.pop()
+        for child_d in d.get("children") or []:
+            if not isinstance(child_d, dict):
+                continue
+            child = _node_from_dict(child_d)
+            parent.children.append(child)
+            count += 1
+            if count >= max_nodes:
+                log.warning("ax build capped at %d nodes", max_nodes)
+                return new_root
+            stack.append((child_d, child))
+    return new_root
+
+
+def _from_dict(d: dict) -> AxNode:
+    # kept for backwards-compat imports; delegates to the iterative builder
+    return _from_dict_iter(d)
 
 
 def walk(root: AxNode | None) -> list[AxNode]:

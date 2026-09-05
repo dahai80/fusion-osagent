@@ -179,10 +179,13 @@ class Replayer:
                 return False
             res = await self.agent.executor.scroll(Locator(kind="point", x=at[0], y=at[1]), 0.0, action.get("dy", -3.0))
             return bool(res.get("ok"))
-        if verb in ("drag from", "drag_start"):
+        if verb in ("drag from", "drag_start", "drag"):
             # B8: a drag is ONE atomic executor.drag(src,dst). The paired
             # "drop at"/"drag_end" step is the release half — it must NOT call
             # drag again (double-execution). Only the start half dispatches.
+            # E3: accept the unified "drag" verb as well as the two half-verbs
+            # so a single change to the translator VERB map cannot break one
+            # path while the other keeps working.
             src = action.get("at")
             dst = action.get("drag_to")
             if not src or not dst:

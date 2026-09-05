@@ -32,6 +32,21 @@ log = get_logger("os_agent.image_cache")
 _CACHE: OrderedDict[str, Image.Image] = OrderedDict()
 _MAX_ENTRIES = 8
 _LOCK = threading.Lock()
+_HITS = 0
+_MISSES = 0
+
+
+def configure(max_entries: int) -> None:
+    """A5: raise the bound from the 8-entry default. 8 thrashes a single
+    perception cycle (capture/mask/som/diff-before/diff-after = 5+ frames) and
+    evicts hot frames across concurrent DesktopAgent instances. Called once at
+    DesktopAgent init from cfg.image_cache_max_entries.
+    """
+    global _MAX_ENTRIES
+    with _LOCK:
+        if max_entries > _MAX_ENTRIES:
+            _MAX_ENTRIES = max_entries
+            log.info("image_cache max_entries raised to %d", _MAX_ENTRIES)
 
 
 def _key(png_b64: str) -> str:
@@ -41,12 +56,15 @@ def _key(png_b64: str) -> str:
 
 def get_image(png_b64: str) -> Image.Image:
     """Return a decoded RGB PIL Image for png_b64, cached on identity."""
+    global _HITS, _MISSES
     k = _key(png_b64)
     with _LOCK:
         img = _CACHE.get(k)
         if img is not None:
             _CACHE.move_to_end(k)
+            _HITS += 1
             return img
+        _MISSES += 1
     img = Image.open(io.BytesIO(base64.b64decode(png_b64))).convert("RGB")
     with _LOCK:
         _CACHE[k] = img
@@ -56,6 +74,15 @@ def get_image(png_b64: str) -> Image.Image:
     return img
 
 
+def stats() -> dict:
+    """E5: cache hit/miss counters for observability export."""
+    with _LOCK:
+        return {"hits": _HITS, "misses": _MISSES, "entries": len(_CACHE), "max_entries": _MAX_ENTRIES}
+
+
 def clear() -> None:
+    global _HITS, _MISSES
     with _LOCK:
         _CACHE.clear()
+        _HITS = 0
+        _MISSES = 0

@@ -121,23 +121,30 @@ class ExecutorAdapter:
         (hundreds of nodes) routinely exceeds the 5s click timeout. Give it an
         independent, longer budget so AX traversal is not misclassified as a
         timeout failure that permanently demotes perception to plain screenshot.
+        R5: a single attempt let an instantaneous UDS hiccup fail the whole
+        perception cycle (no screenshot → visual locate has no image). Retry
+        once on transient transport error so a blip does not abort locate.
         """
         if kind == KIND_INSPECT_TREE:
             timeout = max(self.cfg.inspect_timeout_ms / 1000.0, 5.0)
         else:
             timeout = max(self.cfg.step_timeout_ms / 1000.0, 5.0)
         action = {"kind": kind}
-        try:
-            return await asyncio.wait_for(
-                asyncio.to_thread(self._ensure().gui_action, action), timeout=timeout
-            )
-        except TimeoutError:
-            log.error("executor %s timed out after %.1fs", kind, timeout)
-            return _GuiResultError(f"executor timeout: {kind}")
-        except Exception as e:
-            log.error("executor %s raised: %s", kind, e)
-            self._ex = None
-            return _GuiResultError(str(e))
+        last_err = None
+        for attempt in range(2):
+            try:
+                return await asyncio.wait_for(
+                    asyncio.to_thread(self._ensure().gui_action, action), timeout=timeout
+                )
+            except TimeoutError:
+                last_err = f"executor timeout: {kind}"
+                log.error("executor %s timed out after %.1fs (attempt %d)", kind, timeout, attempt + 1)
+                self._ex = None
+            except Exception as e:
+                last_err = str(e)
+                log.error("executor %s raised (attempt %d): %s", kind, attempt + 1, e)
+                self._ex = None
+        return _GuiResultError(last_err or f"executor failed: {kind}")
 
     async def click(self, loc: Locator, button: str = "left") -> dict:
         x, y = self._to_pixel(loc)
@@ -174,9 +181,19 @@ class ExecutorAdapter:
         Reduced waypoint set (D10 fix): upstream E2 will give batch-move; until
         then a small human-like path (~6 points) keeps round-trips bounded and
         the loop responsive. ok=False if any step fails.
+        R3: a whole-path budget (cfg.move_path_timeout_ms) bounds the total; each
+        per-point hover already has its own 5s timeout but 24 points × 5s = 120s
+        worst case with no overall deadline could hang the Agent. Exceeding the
+        path budget stops the move and returns the last failure.
         """
+        import time as _time
+
+        deadline = _time.monotonic() + (self.cfg.move_path_timeout_ms / 1000.0)
         last = {"ok": True, "error": None, "kind": "move_path"}
         for pt in points:
+            if _time.monotonic() > deadline:
+                log.error("move_path exceeded whole-path budget %dms — stopping", self.cfg.move_path_timeout_ms)
+                return {"ok": False, "error": "move_path timeout", "kind": "move_path"}
             x, y = points_to_pixels(pt[0], pt[1], self.cfg.scale_factor)
             last = await self._run({"kind": KIND_HOVER, "at": [x, y]})
             if not last.get("ok"):

@@ -64,8 +64,12 @@ def always_true(_shot: Screenshot, _state: dict) -> GuardResult:
 class Planner:
     """Runs a Plan step-by-step with State Guard + one heal-retry."""
 
-    def __init__(self, max_retries: int = 1) -> None:
+    def __init__(self, max_retries: int = 1, max_heal_cycles: int = 4) -> None:
         self.max_retries = max_retries
+        # A2: bound total successful heals so a flapping step (execute fail →
+        # heal ok → execute fail ...) cannot loop forever. Each successful heal
+        # used to reset `retries` to 0, so the while-loop never exited.
+        self.max_heal_cycles = max_heal_cycles
 
     def check_guard(self, step: Step, shot: Screenshot, state: dict) -> GuardResult:
         guard = step.guard or always_true
@@ -135,27 +139,35 @@ class Planner:
         halt after exhausting retries halts for good (Rule 12).
         """
         retries = 0
+        heal_cycles = 0
         while plan.status in (PlanStatus.RUNNING, PlanStatus.PENDING):
             shot = await capture()
             await self.advance(plan, shot, execute)
             if plan.status == PlanStatus.HALTED and retries < self.max_retries:
                 retries += 1
                 healed = False
-                if heal is not None:
+                if heal is not None and heal_cycles < self.max_heal_cycles:
                     try:
                         healed = bool(await heal(plan, shot))
                     except Exception as e:
                         log.error("heal callback raised: %s", e)
                         healed = False
-                    log.info("plan %s halted, heal %s retry %d/%d", plan.name, "ok" if healed else "failed", retries, self.max_retries)
+                    log.info("plan %s halted, heal %s retry %d/%d cycle %d/%d", plan.name, "ok" if healed else "failed", retries, self.max_retries, heal_cycles, self.max_heal_cycles)
+                elif heal is not None and heal_cycles >= self.max_heal_cycles:
+                    log.error("plan %s halted, heal cycle budget exhausted (%d) — halt for good", plan.name, heal_cycles)
+                    plan.state["halt_reason"] = f"heal cycle budget exhausted ({heal_cycles})"
+                    break
                 else:
                     log.info("plan %s halted, no heal — re-advance retry %d/%d", plan.name, retries, self.max_retries)
                 if healed:
                     plan.state.pop("halt_step", None)
                     plan.state.pop("halt_reason", None)
+                    heal_cycles += 1
                     # R3: a successful heal means the halt was transient — give
                     # the plan its full retry budget back so a subsequent
                     # genuine failure is not mistaken for "retries exhausted".
+                    # A2: but heal_cycles is NOT reset, so a flapping step is
+                    # bounded by max_heal_cycles instead of looping forever.
                     retries = 0
                 plan.status = PlanStatus.RUNNING
                 continue

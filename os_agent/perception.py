@@ -58,12 +58,21 @@ class Perception:
         executor: ExecutorAdapter | StubExecutorAdapter,
         mlx: MlxAdapter | StubMlxAdapter,
         browser: BrowserAdapter | StubBrowserAdapter | None = None,
+        vlm_cache=None,
+        masker: SensitiveMasker | None = None,
     ) -> None:
         self.cfg = cfg
         self.executor = executor
         self.mlx = mlx
         self.browser = browser
-        self.masker = SensitiveMasker()
+        # E4: accept a shared masker so reasoner + perception use one instance
+        # (unified masked_count + a single LRU). Falls back to its own only when
+        # constructed standalone (tests).
+        self.masker = masker if masker is not None else SensitiveMasker()
+        # R6: visual locate is the biggest inference spender (replayer calls it
+        # every step) yet bypassed the reasoner's vlm_cache. Reuse the same
+        # cache so a repeated identical (prompt, masked image) skips re-infer.
+        self.vlm_cache = vlm_cache
 
     async def capture(self, prefer_ax: bool = True) -> Screenshot:
         if prefer_ax:
@@ -146,11 +155,23 @@ class Perception:
             return Locator(kind="visual", x=None, y=None, visual_query=query, raw={"confidence": 0.0, "error": "no screenshot"})
         shot = self.masker.mask(shot)  # F3.5: never feed raw sensitive pixels to VLM
         prompt = GROUNDING_PROMPT.format(query=query)
-        try:
-            data = await self.mlx.chat_json(prompt, shot.png_b64)
-        except Exception as e:
-            log.exception("visual locate mlx failed")
-            return Locator(kind="visual", x=None, y=None, visual_query=query, raw={"confidence": 0.0, "error": str(e)})
+        # R6: short-circuit identical visual-locate inferences via the shared
+        # vlm_cache (same scheme as the reasoner) so replayer guard re-locates
+        # on an unchanged screen skip the VLM round-trip.
+        model = getattr(self.mlx, "model", "")
+        data = None
+        if self.vlm_cache is not None:
+            cached, hit = self.vlm_cache.get(model, prompt, shot.png_b64 or "")
+            if hit:
+                data = cached
+        if data is None:
+            try:
+                data = await self.mlx.chat_json(prompt, shot.png_b64)
+            except Exception as e:
+                log.exception("visual locate mlx failed")
+                return Locator(kind="visual", x=None, y=None, visual_query=query, raw={"confidence": 0.0, "error": str(e)})
+            if self.vlm_cache is not None:
+                self.vlm_cache.put(model, prompt, shot.png_b64 or "", data)
         if data is None:
             log.warning("visual locate: mlx returned no JSON for %r", query)
             return Locator(kind="visual", x=None, y=None, visual_query=query, raw={"confidence": 0.0, "error": "non-JSON"})

@@ -166,10 +166,12 @@ class CodeDebugLoop:
         return str(safe)
 
     def trigger_refix(self, report_path: str) -> subprocess.CompletedProcess | None:
-        """Invoke fusion-code CLI to consume the feedback report and re-fix.
+        """Synchronous fusion-code CLI re-fix (legacy entry point).
 
-        Protocol pending upstream C1; today we pass --visual-feedback <path>.
-        Returns None if the binary is absent (non-fatal: report still on disk).
+        A3: prefer `trigger_refix_async` from async contexts — this synchronous
+        `subprocess.run(timeout=300)` blocks the event loop for up to 5 minutes
+        if called from a coroutine, freezing every concurrent screenshot/click.
+        Kept for non-async callers (CLI scripts, notebooks).
         """
         cmd = [self.fusion_code_bin, "--visual-feedback", report_path]
         try:
@@ -182,3 +184,15 @@ class CodeDebugLoop:
         except subprocess.TimeoutExpired:
             log.error("fusion-code refix timed out")
             return None
+
+    async def trigger_refix_async(self, report_path: str) -> subprocess.CompletedProcess | None:
+        """Async fusion-code CLI re-fix — offloads subprocess.run to a thread.
+
+        A3: `subprocess.run(timeout=300)` is blocking; calling the sync
+        `trigger_fix` from the Agent event loop froze every concurrent task for
+        up to 5 minutes (model load). asyncio.to_thread lets the loop keep
+        running while the subprocess blocks in a worker thread.
+        """
+        import asyncio
+
+        return await asyncio.to_thread(self.trigger_refix, report_path)

@@ -22,6 +22,17 @@ from os_agent.config import OsaConfig
 log = get_logger("os_agent.cli")
 
 
+async def _mlx_health_ping(cfg: OsaConfig) -> bool:
+    """E2: live mlx health check for the (otherwise synchronous) preflight."""
+    from os_agent.adapters.mlx import MlxAdapter
+
+    mlx = MlxAdapter(cfg)
+    try:
+        return await mlx.health()
+    finally:
+        await mlx.close()
+
+
 def preflight() -> int:
     results: list[tuple[str, bool, str]] = []
 
@@ -54,6 +65,15 @@ def preflight() -> int:
 
     cache = Path.home() / ".fusion-mlx" / "models"
     check("mlx model cache dir", cache.is_dir(), str(cache))
+
+    # E2: a path/url string check always reports ✅ even when mlx is down, so
+    # ops pass preflight and only discover the breakage when every click fails.
+    # Actually ping the mlx health endpoint so a stopped engine fails loudly.
+    try:
+        mlx_ok = asyncio.run(_mlx_health_ping(OsaConfig()))
+        check("fusion-mlx reachable (health ping)", mlx_ok, mlx_url if mlx_ok else "health ping failed — is mlx running?")
+    except Exception as e:
+        check("fusion-mlx reachable (health ping)", False, str(e))
 
     ok_count = sum(1 for _, ok, _ in results if ok)
     fail = len(results) - ok_count

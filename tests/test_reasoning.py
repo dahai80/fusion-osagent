@@ -10,6 +10,10 @@ from os_agent.som import SomAnnotator
 
 SHOT = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
 
+# N5: Fast core skips when there is no AX tree, so give the test shot a real
+# (non-sensitive) AX tree so the Fast path actually runs.
+AX_TREE = '{"role":"AXWindow","children":[{"role":"AXButton","label":"OK","frame":[0,0,40,20]}]}'
+
 
 class FakeMlx:
     name = "mlx-fake"
@@ -30,7 +34,7 @@ class FakeMlx:
 
 
 def _shot() -> Screenshot:
-    return Screenshot(png_b64=SHOT, width=400, height=300, scale_factor=2.0, node_tree=None)
+    return Screenshot(png_b64=SHOT, width=400, height=300, scale_factor=2.0, node_tree=AX_TREE)
 
 
 @pytest.mark.asyncio
@@ -147,8 +151,8 @@ async def test_vlm_cache_miss_on_changed_screenshot():
     mlx = FakeMlx(fast_resp={"action": "click", "target": "OK", "confidence": 0.9, "unknown_dialog": False})
     r = Reasoner(OsaConfig(), mlx, SomAnnotator(OsaConfig()))
     try:
-        s1 = Screenshot(png_b64=_colored_png((255, 0, 0)), width=200, height=200, scale_factor=2.0, node_tree=None)
-        s2 = Screenshot(png_b64=_colored_png((0, 0, 255)), width=200, height=200, scale_factor=2.0, node_tree=None)
+        s1 = Screenshot(png_b64=_colored_png((255, 0, 0)), width=200, height=200, scale_factor=2.0, node_tree=AX_TREE)
+        s2 = Screenshot(png_b64=_colored_png((0, 0, 255)), width=200, height=200, scale_factor=2.0, node_tree=AX_TREE)
         await r.decide("click OK button", s1)
         await r.decide("click OK button", s2)
         assert len(mlx.calls) == 2

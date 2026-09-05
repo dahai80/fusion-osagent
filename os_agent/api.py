@@ -27,6 +27,7 @@ from os_agent.crop_zoom import CropResult, CropZoomer
 from os_agent.healer import Healer
 from os_agent.loops.autotest import AutotestLoop
 from os_agent.loops.code_debug import CodeDebugLoop
+from os_agent.mask import SensitiveMasker
 from os_agent.perception import Perception
 from os_agent.reasoning import Reason, Reasoner
 from os_agent.recorder import Recording
@@ -53,6 +54,9 @@ class DesktopAgent:
 
     def __init__(self, cfg: OsaConfig | None = None) -> None:
         self.cfg = cfg or OsaConfig()
+        # A5: size the shared image cache from config (default was a thrashing 8).
+        from os_agent import image_cache
+        image_cache.configure(self.cfg.image_cache_max_entries)
         self.executor: ExecutorAdapter | StubExecutorAdapter = (
             StubExecutorAdapter(self.cfg) if self.cfg.stub_mode else ExecutorAdapter(self.cfg)
         )
@@ -65,16 +69,27 @@ class DesktopAgent:
         self.studio: AgentStudioAdapter | StubAgentStudioAdapter = (
             StubAgentStudioAdapter(self.cfg) if self.cfg.stub_mode else AgentStudioAdapter(self.cfg)
         )
-        self.perception = Perception(self.cfg, self.executor, self.mlx, self.browser)
+        # E4: one shared masker for reasoner + perception (was two independent
+        # instances with split masked_count + LRU caches).
+        self.masker = SensitiveMasker()
+        self.perception = Perception(self.cfg, self.executor, self.mlx, self.browser, masker=self.masker)
         self.som = SomAnnotator(self.cfg)
         self.asserter = FrameAsserter(self.cfg, self.mlx)
         self.healer = Healer(self.cfg, self.perception)
-        self.reasoner = Reasoner(self.cfg, self.mlx, self.som)
+        self.reasoner = Reasoner(self.cfg, self.mlx, self.som, masker=self.masker)
+        # R6: share the reasoner's vlm_cache with perception so visual locate
+        # also skips re-inference on an unchanged screen.
+        self.perception.vlm_cache = self.reasoner.vlm_cache
         self.crop_zoomer = CropZoomer(self.cfg)
         self.code_debug = CodeDebugLoop(self.cfg, self)
         self.autotest = AutotestLoop(self.cfg)
         self.translator = Translator()
         self.replayer = Replayer(self)
+        # N9: remember the last logical-point cursor position so human-like
+        # moves start from where the cursor actually is, not a teleport from
+        # (0,0). A jump from the corner to the target every click is both
+        # visually jarring and a bot fingerprint.
+        self._cursor_pos: tuple[float, float] = (0.0, 0.0)
         log.info("DesktopAgent ready stub=%s mlx=%s", self.cfg.stub_mode, self.mlx.model)
 
     async def screenshot(self) -> Screenshot:
@@ -160,12 +175,18 @@ class DesktopAgent:
         return self.crop_zoomer.crop_around(shot, center_px, half_extent_px=half_extent_px, upscale=upscale)
 
     async def click_humanlike(self, x: float, y: float, start: tuple[float, float] | None = None, traj: TrajectoryConfig | None = None) -> ActionResult:
-        """Human-like click: Bezier path to (x,y) then click (F3.1 execution, Phase 3)."""
+        """Human-like click: Bezier path to (x,y) then click (F3.1 execution, Phase 3).
+
+        N9: when `start` is not given, begin from the last known cursor
+        position (tracked across calls) instead of (0,0). A corner-to-target
+        teleport every click is a bot fingerprint and wastes the path budget.
+        """
         t0 = time.monotonic()
-        start = start or (0.0, 0.0)
+        start = start or self._cursor_pos
         path = bezier_path(start, (x, y), traj or TrajectoryConfig(seed=self.cfg.trajectory_seed))
         await self.executor.move_path(path)
         res = await self.executor.click(Locator(kind="point", x=x, y=y), button="left")
+        self._cursor_pos = (x, y)
         ms = int((time.monotonic() - t0) * 1000)
         log.info("click_humanlike: %d waypoints %dms ok=%s", len(path), ms, res.get("ok"))
         return ActionResult(ok=res.get("ok", False), action="click_humanlike", latency_ms=ms, error=res.get("error"), meta={"waypoints": len(path)})

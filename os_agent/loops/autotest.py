@@ -80,6 +80,18 @@ class AutotestLoop:
         log.info("autotest vlm: %s", " ".join(cmd))
         return subprocess.run(cmd, capture_output=True, text=True, timeout=120)
 
+    async def verify_async(self, shot_png_bytes: bytes, prd_path: str, expected: str | None = None) -> DefectVerdict:
+        """R2: async wrapper — offloads the blocking verify() to a worker thread.
+
+        verify() shells out to `fusion-autotest vlm` with subprocess.run(timeout=120),
+        which blocks the event loop for up to 2 minutes if called from a coroutine.
+        asyncio.to_thread lets the Agent loop keep running screenshots/clicks while
+        the subprocess blocks in a worker thread.
+        """
+        import asyncio
+
+        return await asyncio.to_thread(self.verify, shot_png_bytes, prd_path, expected)
+
     def _parse_verdict(self, out_dir: str, stdout: str) -> DefectVerdict:
         result_path = Path(out_dir) / "vlm_result.json"
         if not result_path.is_file():

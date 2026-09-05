@@ -46,7 +46,10 @@ class CropZoomer:
             log.warning("crop: empty screenshot")
             return None
         try:
-            img = Image.open(io.BytesIO(base64.b64decode(shot.png_b64))).convert("RGB")
+            # E1: reuse the shared decoded-image cache instead of a standalone
+            # PIL decode, consistent with mask/som/diff (one decode per frame).
+            from os_agent import image_cache
+            img = image_cache.get_image(shot.png_b64)
         except Exception as e:
             log.error("crop decode failed: %s", e)
             return None
@@ -74,11 +77,22 @@ class CropZoomer:
             upscale=upscale,
         )
 
-    def resolve_local_to_global(self, crop: CropResult, local_norm: tuple[float, float]) -> Locator:
-        """Map a normalized (0-1) point in the crop back to a global logical-point Locator."""
+    def resolve_local_to_global(self, crop: CropResult, local_norm: tuple[float, float], scale_factor: float | None = None) -> Locator:
+        """Map a normalized (0-1) point in the crop back to a global logical-point Locator.
+
+        A1: use the frame's per-screenshot `scale_factor` (passed by the caller
+        that knows which Screenshot the crop came from) instead of the global
+        cfg default. A crop from a 1x external display converted with the 2x
+        Retina default lands the click halfway to the top-left — on a different
+        control (e.g. an adjacent delete button). Falls back to cfg only when
+        the caller does not supply one.
+        """
         nx, ny = local_norm
         gx_px = crop.origin_px[0] + nx * crop.orig_width
         gy_px = crop.origin_px[1] + ny * crop.orig_height
-        x_pt, y_pt = pixels_to_points(gx_px, gy_px, self.cfg.scale_factor)
-        log.info("crop resolve: norm=(%.3f,%.3f) -> px=(%.1f,%.1f) -> pt=(%.1f,%.1f)", nx, ny, gx_px, gy_px, x_pt, y_pt)
-        return Locator(kind="visual", x=x_pt, y=y_pt, raw={"crop_origin": list(crop.origin_px), "local_norm": [nx, ny]})
+        scale = scale_factor if scale_factor else self.cfg.scale_factor
+        if scale_factor and scale_factor != self.cfg.scale_factor:
+            log.info("crop resolve: using frame scale=%.2f (cfg=%.2f)", scale_factor, self.cfg.scale_factor)
+        x_pt, y_pt = pixels_to_points(gx_px, gy_px, scale)
+        log.info("crop resolve: norm=(%.3f,%.3f) -> px=(%.1f,%.1f) -> pt=(%.1f,%.1f) scale=%.2f", nx, ny, gx_px, gy_px, x_pt, y_pt, scale)
+        return Locator(kind="visual", x=x_pt, y=y_pt, raw={"crop_origin": list(crop.origin_px), "local_norm": [nx, ny], "scale_factor": scale})

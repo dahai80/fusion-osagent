@@ -11,8 +11,11 @@ in the returned node_tree so no cleartext value reaches the model.
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import json
+import threading
+from collections import OrderedDict
 
 from fusion_core import get_logger
 from PIL import ImageDraw, ImageFilter
@@ -23,6 +26,7 @@ from os_agent.adapters.base import Screenshot
 log = get_logger("os_agent.mask")
 
 MIN_BLUR_RADIUS = 16
+_MASK_CACHE_MAX = 16
 
 
 def _adaptive_blur_radius(img) -> int:
@@ -39,10 +43,39 @@ class SensitiveMasker:
 
     def __init__(self) -> None:
         self.masked_count = 0
+        # A6: cache the masked b64+tree for a given (png_b64, node_tree) pair.
+        # fast→slow escalation masks the same shot twice; perception masks a
+        # third time. Each mask re-runs collect_sensitive + ImageDraw + PNG
+        # re-encode (hundreds of KB). The masked output is deterministic, so a
+        # short LRU avoids the redundant encode and keeps vlm_cache keys stable.
+        self._cache: OrderedDict[str, Screenshot] = OrderedDict()
+        self._cache_lock = threading.Lock()
+
+    def _mask_key(self, shot: Screenshot) -> str:
+        h = hashlib.sha1()
+        h.update((shot.png_b64 or "").encode("ascii", "ignore"))
+        h.update(b"|")
+        h.update((shot.node_tree or "").encode("utf-8", "ignore"))
+        return h.hexdigest()[:16]
 
     def mask(self, shot: Screenshot) -> Screenshot:
         if not shot.png_b64:
             return shot
+        key = self._mask_key(shot)
+        with self._cache_lock:
+            cached = self._cache.get(key)
+            if cached is not None:
+                self._cache.move_to_end(key)
+                return cached
+        result = self._mask_impl(shot)
+        with self._cache_lock:
+            self._cache[key] = result
+            self._cache.move_to_end(key)
+            if len(self._cache) > _MASK_CACHE_MAX:
+                self._cache.popitem(last=False)
+        return result
+
+    def _mask_impl(self, shot: Screenshot) -> Screenshot:
         tree = ax_tree.parse(shot.node_tree)
         sensitive = ax_tree.collect_sensitive(tree)
         if sensitive:

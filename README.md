@@ -266,6 +266,46 @@ internal Beta". Summary of what changed:
   misclassified as a click timeout; `collect_sensitive` early-stops.
 - Regression tests for every fix live in `tests/test_audit0905.py`.
 
+### audit 0905 — v2 supplemental fixes
+
+A follow-up pass closed the remaining audit findings (E4, E6) plus adjacent
+runtime defects (N5, N9, N10) and tightened two earlier fixes:
+
+- **E4 (P2)** — `Reasoner` and `Perception` now share a single
+  `SensitiveMasker` instance (constructed once in `DesktopAgent`). Two
+  independent maskers had split `masked_count` counters and LRU caches, so
+  the fast→slow escalation masked the same shot twice with no cache reuse
+  and the masked-region count was dishonest.
+- **E6 (P3)** — `Translator` gained `translate_async` / `_describe_async`
+  that offload the (blocking, model-backed) `describer` to a worker thread
+  via `asyncio.to_thread`, so translating a recording no longer pins the
+  event loop for one VLM call per step with no way to cancel. The sync
+  `translate()` path is unchanged for offline tests.
+- **N5** — Fast core now skips to Slow directly when a frame has no AX
+  tree. The fail-closed masker blurs the whole no-AX frame to an
+  illegible image, so the 7B Fast core almost always returned `"none"`
+  and escalated anyway — but only after a wasted VLM round-trip. Skipping
+  Fast outright removes the dead inference.
+- **N9** — `click_humanlike` now starts the Bezier path from the tracked
+  cursor position (`DesktopAgent._cursor_pos`) instead of a fixed
+  `(0,0)`. A corner-to-target teleport on every click was both visually
+  jarring and a bot fingerprint; the position is updated after each click.
+- **N10** — `bezier_path` with no explicit seed now derives a per-target
+  seed from the start/end coords (reproducible for the same target,
+  varying across targets) instead of a fixed `seed=7` that made every
+  click trace the identical jitter shape — a strong bot fingerprint.
+  `OSA_TRAJECTORY_SEED` now defaults to `None` (per-target); set it to a
+  fixed int for strict replay.
+- **A2 (tightened)** — `Planner` now bounds total successful heals with
+  `max_heal_cycles` (default 4, `OSA_PLANNER_MAX_HEAL_CYCLES`) so a
+  flapping step (execute fail → heal ok → execute fail …) cannot loop
+  forever, even though each successful heal still resets the per-step
+  retry budget.
+- **R4 (tightened)** — `assert_changed` threshold is now
+  `cfg.assert_diff_threshold` (default 0.002, `OSA_ASSERT_DIFF_THRESHOLD`)
+  so cursor-blink false positives and small-highlight false negatives can
+  be tuned per scene instead of a hardcoded constant.
+
 Upstream blockers unchanged: E1 (executor scale_factor/capability query),
 E2 (executor batch-move), B2 (browser Python client), C1 (code
 visual-feedback protocol), AT1 (autotest single-requirement mode) remain

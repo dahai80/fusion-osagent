@@ -44,14 +44,18 @@ class FrameAsserter:
         before: Screenshot,
         after: Screenshot,
         expected: str | None = None,
-        threshold: float = DIFF_THRESHOLD,
+        threshold: float | None = None,
     ) -> FrameAssertion:
         if not before.png_b64 or not after.png_b64:
             log.warning("assert_changed: missing frame(s) before=%s after=%s", bool(before.png_b64), bool(after.png_b64))
             return FrameAssertion(ok=False, changed=False, changed_ratio=0.0, error="missing frame")
+        # R4: threshold is configurable (cfg.assert_diff_threshold) so cursor
+        # blink / clock-tick false positives and small-highlight false negatives
+        # can be tuned per scene instead of a hardcoded 0.002.
+        eff_threshold = threshold if threshold is not None else self.cfg.assert_diff_threshold
         ratio = self._diff_ratio(before.png_b64, after.png_b64)
-        changed = ratio >= threshold
-        log.info("assert_changed: ratio=%.5f threshold=%.5f changed=%s", ratio, threshold, changed)
+        changed = ratio >= eff_threshold
+        log.info("assert_changed: ratio=%.5f threshold=%.5f changed=%s", ratio, eff_threshold, changed)
         if not changed:
             return FrameAssertion(ok=False, changed=False, changed_ratio=ratio, error="no pixel change detected")
         if expected:

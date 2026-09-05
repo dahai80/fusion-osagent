@@ -48,11 +48,14 @@ class FastProposal:
 class Reasoner:
     """Fast/Slow dual-core scheduler."""
 
-    def __init__(self, cfg: OsaConfig, mlx, som) -> None:
+    def __init__(self, cfg: OsaConfig, mlx, som, masker: SensitiveMasker | None = None) -> None:
         self.cfg = cfg
         self.mlx = mlx
         self.som = som
-        self.masker = SensitiveMasker()
+        # E4: share ONE masker across reasoner + perception (was two instances
+        # with independent masked_count + LRU caches). A single instance keeps
+        # the masked-region count honest and lets the LRU serve both callers.
+        self.masker = masker if masker is not None else SensitiveMasker()
         self.fast_confidence_floor = cfg.fast_confidence_floor
         self.vlm_cache = VlmCache(ttl=cfg.vlm_cache_ttl)  # P5/B4: skip re-infer on identical input
 
@@ -82,6 +85,15 @@ class Reasoner:
         return await self._slow_plan(query, shot, history)
 
     async def _fast_propose(self, query: str, shot: Screenshot) -> FastProposal:
+        # N5: on a no-AX screen the fail-closed masker blurs the whole frame, so
+        # the Fast 7B core reasons over an illegible image and almost always
+        # returns "none" → permanent Slow escalation, making Fast dead weight.
+        # Skip Fast outright on no-AX and go straight to Slow (which has SOM + a
+        # larger model and at least gets the unblurred-but-sensitive-blacked
+        # frame). Fast is only useful when an AX tree gives it a legible mask.
+        if not shot.node_tree:
+            log.info("fast propose: no AX tree — skip Fast, escalate to Slow directly")
+            return FastProposal(action="none", target="", confidence=0.0, unknown_dialog=True)
         prompt = (
             "You are a Fast GUI agent. Given the screenshot and the goal, pick ONE next action. "
             f"Goal: {query}. "

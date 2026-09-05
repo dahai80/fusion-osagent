@@ -28,6 +28,11 @@ class MlxAdapter:
         self.cfg = cfg
         self.model = model or cfg.fast_model
         self._client: FusionMLXClient | None = None
+        # A4: bound concurrent mlx vision inferences. Multiple decide()/locate()
+        # calls in one event loop (and multiple DesktopAgent instances sharing a
+        # mlx cluster) otherwise fire N×M simultaneous requests → mlx OOM.
+        # The semaphore serializes at the inference boundary only.
+        self._semaphore = asyncio.Semaphore(max(1, cfg.vlm_concurrency))
 
     def _ensure(self) -> FusionMLXClient:
         if self._client is None:
@@ -51,10 +56,13 @@ class MlxAdapter:
             # stall) cannot hang the Agent loop forever. Re-raise on timeout so
             # callers (fail-loud) treat it as a failed inference, not a silent
             # default coordinate.
-            resp = await asyncio.wait_for(
-                client.chat(messages=[{"role": "user", "content": content}], model=use_model),
-                timeout=self.cfg.vlm_timeout,
-            )
+            # A4: acquire the concurrency semaphore so concurrent decide()/locate()
+            # calls queue instead of flooding mlx (OOM under cluster load).
+            async with self._semaphore:
+                resp = await asyncio.wait_for(
+                    client.chat(messages=[{"role": "user", "content": content}], model=use_model),
+                    timeout=self.cfg.vlm_timeout,
+                )
             return resp.content.strip()
         except TimeoutError:
             log.error("mlx vision chat timed out after %.1fs model=%s", self.cfg.vlm_timeout, use_model)

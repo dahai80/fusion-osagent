@@ -183,6 +183,18 @@ D14（真实端到端跑通）受环境门控：7 个集成测试在 `OSA_RUN_IN
 - **P2/P3** —— perception 死代码重复 return 块删除；`image_cache` 加锁（`asyncio.to_thread` 下线程安全）；`vlm_cache` prompt 改 sha1 哈希（dict key 不再存 KB 级字符串）；executor `_run` 真重试一次（兑现 docstring）并在 clamp 时告警；`inspect_tree` 独立超时（`OSA_INSPECT_TIMEOUT_MS` 默认 15s），AX 遍历不再被误判为点击超时；`collect_sensitive` 早停。
 - 每项修复均有回归测试在 `tests/test_audit0905.py`。
 
+### 审计 0905 —— v2 补充修复
+
+后续一轮关闭了审计剩余项（E4、E6）及邻近运行时缺陷（N5、N9、N10），并收紧两处早期修复：
+
+- **E4（P2）** —— `Reasoner` 与 `Perception` 现共享同一个 `SensitiveMasker`（在 `DesktopAgent` 构造一次）。此前两个独立 masker 的 `masked_count` 计数与 LRU 缓存各自分裂，fast→slow 升级对同一帧重复打码且无缓存复用，打码区域计数也不准。
+- **E6（P3）** —— `Translator` 新增 `translate_async`/`_describe_async`，将阻塞的模型 `describer` 通过 `asyncio.to_thread` 下放到工作线程，翻译录制不再按步逐次 VLM 阻塞事件循环且无法取消。同步 `translate()` 路径不变，供离线测试。
+- **N5** —— Fast 核心在帧无 AX 树时直接跳到 Slow。fail-closed 打码会把无 AX 整帧模糊到不可辨认，7B Fast 几乎总返回 `"none"` 随即升级 —— 但白白浪费一次 VLM 往返。直接跳过 Fast 移除该无效推理。
+- **N9** —— `click_humanlike` 现从已跟踪光标位置（`DesktopAgent._cursor_pos`）起笔，而非固定 `(0,0)`。每次点击从角落瞬移到目标既突兀又是机器人指纹；点击后更新位置。
+- **N10** —— `bezier_path` 无显式 seed 时按起止坐标派生每目标 seed（同目标可复现、跨目标变化），而非固定 `seed=7` 使每次点击抖动形状完全一致——强机器人指纹。`OSA_TRAJECTORY_SEED` 默认 `None`（每目标）；严格回放可设固定整数。
+- **A2（收紧）** —— `Planner` 以 `max_heal_cycles`（默认 4，`OSA_PLANNER_MAX_HEAL_CYCLES`）限界总愈合次数，flapping 步骤（执行失败→愈合成功→执行失败…）不再死循环，尽管每次愈合成功仍重置单步 retry 预算。
+- **R4（收紧）** —— `assert_changed` 阈值改取 `cfg.assert_diff_threshold`（默认 0.002，`OSA_ASSERT_DIFF_THRESHOLD`），光标闪烁误报与小高亮漏报可按场景调参，不再硬编码。
+
 上游阻塞不变：E1（executor scale_factor/能力查询）、E2（executor 批量 move）、B2（browser Python 客户端）、C1（code 视觉回喂协议）、AT1（autotest 单需求模式）仍以 issue 上报，不在本仓内修补。
 
 ## 上游依赖
