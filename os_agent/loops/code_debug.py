@@ -9,6 +9,7 @@ format is pending upstream issue C1 (fusion-code visual-feedback protocol).
 osagent does not patch fusion-code — it only emits the report file + optionally
 invokes the `fusion-code` CLI to trigger a re-fix cycle.
 """
+
 from __future__ import annotations
 
 import base64
@@ -97,6 +98,17 @@ class CodeDebugLoop:
             log.error("code_debug focus failed: %s", e)
             self.write_report(fb, report_path)
             return fb
+        # P1 arch fix: capture `before` BEFORE the click so assert_changed
+        # compares a true pre-action frame against its own post-action `after`.
+        # The old code captured `before` after click_by, so before+after were
+        # both post-click and assert_changed always reported "no change".
+        try:
+            before = await self.agent.screenshot()
+        except Exception as e:
+            fb.reason = f"pre-click capture failed: {e}"
+            log.error("code_debug before-capture failed: %s", e)
+            self.write_report(fb, report_path)
+            return fb
         try:
             res = await self.agent.click_by(action_query)
             fb.raw["click_ok"] = res.ok
@@ -112,17 +124,12 @@ class CodeDebugLoop:
             self.write_report(fb, report_path)
             return fb
         try:
-            # B3: capture `before` right after the click (post-action frame) and
-            # let assert_changed capture `after` separately — otherwise the API
-            # grabs before+after back-to-back with no action between them and
-            # always reports "no change".
             # B18: do not pass the action query ("click submit button") as the
             # semantic `expected` — that asks the VLM whether the screenshot
             # "matches the action", which is meaningless. Without a real
             # expected-outcome string, fall back to pixel-diff verification
             # only (expected=None) so we assert "something changed", not a
             # nonsensical semantic match.
-            before = await self.agent.screenshot()
             assertion = await self.agent.assert_changed(before=before, expected=None)
             fb.raw["assert_ok"] = assertion.ok
             fb.raw["changed_ratio"] = assertion.meta.get("changed_ratio")

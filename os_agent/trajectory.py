@@ -8,6 +8,7 @@ E2 batch-move will consume the full list; today callers can iterate).
 Deterministic given the seed (Rule 5): no Math.random at module level; the
 jitter RNG is seeded so replays reproduce the same path.
 """
+
 from __future__ import annotations
 
 import random
@@ -17,7 +18,11 @@ from fusion_core import get_logger
 
 log = get_logger("os_agent.trajectory")
 
-DEFAULT_STEPS = 24
+# P1 perf: 24 steps = 25 executor move RPCs per click. At ~3ms/RPC that is
+# ~75ms of pure IPC overhead per click before any human-likeness benefit on a
+# short path. 6 steps keeps the Bezier curvature visible while cutting the RPC
+# fan-out 4x — the docstring intent was always ~6 waypoints.
+DEFAULT_STEPS = 6
 DEFAULT_JITTER = 1.5  # logical points of perpendicular noise
 
 
@@ -44,7 +49,9 @@ def _derive_seed(seed: int | None, start: tuple[float, float], end: tuple[float,
     return h
 
 
-def bezier_path(start: tuple[float, float], end: tuple[float, float], cfg: TrajectoryConfig | None = None) -> list[tuple[float, float]]:
+def bezier_path(
+    start: tuple[float, float], end: tuple[float, float], cfg: TrajectoryConfig | None = None
+) -> list[tuple[float, float]]:
     """Cubic Bezier from start to end with two auto-control points + jitter.
 
     Control points are placed along the straight line with a perpendicular
@@ -69,8 +76,8 @@ def bezier_path(start: tuple[float, float], end: tuple[float, float], cfg: Traje
     pts: list[tuple[float, float]] = []
     for i in range(cfg.steps + 1):
         t = i / cfg.steps
-        bx = (1 - t) ** 3 * x0 + 3 * (1 - t) ** 2 * t * c1[0] + 3 * (1 - t) * t ** 2 * c2[0] + t ** 3 * x1
-        by = (1 - t) ** 3 * y0 + 3 * (1 - t) ** 2 * t * c1[1] + 3 * (1 - t) * t ** 2 * c2[1] + t ** 3 * y1
+        bx = (1 - t) ** 3 * x0 + 3 * (1 - t) ** 2 * t * c1[0] + 3 * (1 - t) * t**2 * c2[0] + t**3 * x1
+        by = (1 - t) ** 3 * y0 + 3 * (1 - t) ** 2 * t * c1[1] + 3 * (1 - t) * t**2 * c2[1] + t**3 * y1
         # jitter shrinks toward the endpoint so the final click lands exactly
         scale = (1 - t) * cfg.jitter
         bx += rng.uniform(-scale, scale)

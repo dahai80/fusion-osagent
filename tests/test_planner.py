@@ -1,4 +1,5 @@
 """Planner FSM tests — guard pass, guard fail halt, full run, heal-retry."""
+
 from __future__ import annotations
 
 import pytest
@@ -32,10 +33,13 @@ async def _capture():
 
 @pytest.mark.asyncio
 async def test_plan_runs_all_steps_when_guards_pass():
-    plan = Plan(name="p", steps=[
-        Step(name="s1", action="click", target="OK", guard=_guard_ok),
-        Step(name="s2", action="type", target="field", guard=_guard_ok),
-    ])
+    plan = Plan(
+        name="p",
+        steps=[
+            Step(name="s1", action="click", target="OK", guard=_guard_ok),
+            Step(name="s2", action="type", target="field", guard=_guard_ok),
+        ],
+    )
     pl = Planner()
     await pl.run(plan, _capture, _execute_ok)
     assert plan.status == PlanStatus.DONE
@@ -45,9 +49,12 @@ async def test_plan_runs_all_steps_when_guards_pass():
 
 @pytest.mark.asyncio
 async def test_plan_halts_on_guard_fail():
-    plan = Plan(name="p", steps=[
-        Step(name="s1", action="click", target="OK", guard=_guard_fail),
-    ])
+    plan = Plan(
+        name="p",
+        steps=[
+            Step(name="s1", action="click", target="OK", guard=_guard_fail),
+        ],
+    )
     pl = Planner(max_retries=0)
     await pl.run(plan, _capture, _execute_ok)
     assert plan.status == PlanStatus.HALTED
@@ -57,9 +64,12 @@ async def test_plan_halts_on_guard_fail():
 
 @pytest.mark.asyncio
 async def test_plan_halts_on_action_fail():
-    plan = Plan(name="p", steps=[
-        Step(name="s1", action="click", target="OK", guard=_guard_ok),
-    ])
+    plan = Plan(
+        name="p",
+        steps=[
+            Step(name="s1", action="click", target="OK", guard=_guard_ok),
+        ],
+    )
     pl = Planner(max_retries=0)
     await pl.run(plan, _capture, _execute_fail)
     assert plan.status == PlanStatus.HALTED
@@ -76,9 +86,12 @@ async def test_plan_heal_retry_recovers():
             return GuardResult(ok=False, reason="not ready")
         return GuardResult(ok=True, reason="ready now")
 
-    plan = Plan(name="p", steps=[
-        Step(name="s1", action="click", target="OK", guard=_guard_retry),
-    ])
+    plan = Plan(
+        name="p",
+        steps=[
+            Step(name="s1", action="click", target="OK", guard=_guard_retry),
+        ],
+    )
     pl = Planner(max_retries=1)
     await pl.run(plan, _capture, _execute_ok)
     assert plan.status == PlanStatus.DONE
@@ -95,10 +108,13 @@ async def test_plan_empty_is_done():
 
 @pytest.mark.asyncio
 async def test_remaining_steps():
-    plan = Plan(name="p", steps=[
-        Step(name="s1", action="click", target="A"),
-        Step(name="s2", action="type", target="B"),
-    ])
+    plan = Plan(
+        name="p",
+        steps=[
+            Step(name="s1", action="click", target="A"),
+            Step(name="s2", action="type", target="B"),
+        ],
+    )
     plan.cursor = 1
     rem = plan.remaining()
     assert [s.name for s in rem] == ["s2"]

@@ -1,4 +1,5 @@
 """DesktopAgent API tests — stub mode, no live siblings required."""
+
 from __future__ import annotations
 
 import pytest

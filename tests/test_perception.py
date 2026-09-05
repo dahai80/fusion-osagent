@@ -1,4 +1,5 @@
 """Perception dual-track tests — AX hit, AX miss→visual fallback, coordinate convert."""
+
 from __future__ import annotations
 
 import pytest

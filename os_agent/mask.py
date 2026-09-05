@@ -8,6 +8,7 @@ When an AX tree is present, sensitive nodes (secure roles + multilingual label
 hints, see ax_tree.SENSITIVE_*) are blacked out and their labels are redacted
 in the returned node_tree so no cleartext value reaches the model.
 """
+
 from __future__ import annotations
 
 import base64
@@ -56,7 +57,7 @@ class SensitiveMasker:
         h.update((shot.png_b64 or "").encode("ascii", "ignore"))
         h.update(b"|")
         h.update((shot.node_tree or "").encode("utf-8", "ignore"))
-        return h.hexdigest()[:16]
+        return h.hexdigest()  # P3 fix: full digest — 64-bit truncation risked stale-mask collisions
 
     def mask(self, shot: Screenshot) -> Screenshot:
         if not shot.png_b64:
@@ -91,12 +92,19 @@ class SensitiveMasker:
                 node_tree=redacted_tree,
                 meta={**shot.meta, "masked": len(sensitive)},
             )
-        # No AX-tree-declared sensitive regions: if there is NO ax tree at all
-        # (WebGL/Canvas/no-AX), fail closed — blur the whole frame rather than
-        # ship raw pixels that may contain a password field the AX API missed.
-        if not shot.node_tree:
+        # Fail-closed: blur the whole frame when there is NO usable AX tree.
+        # A present-but-empty tree (`{}`, `{"role":"AXWindow","children":[]}`)
+        # common on Canvas/Electron hybrid windows is truthy as a string, so
+        # checking `not shot.node_tree` leaks raw pixels (password fields the
+        # AX API missed). Gate on the PARSED tree: no parsed root or a root
+        # with no children means AX traversal yielded nothing usable.
+        if tree is None or not tree.children:
             blurred = self._blur_all(shot.png_b64)
-            log.warning("mask: no AX tree — fail-closed full-frame blur")
+            log.warning(
+                "mask: no usable AX tree — fail-closed full-frame blur (tree=%s, children=%d)",
+                tree is not None,
+                len(tree.children) if tree else 0,
+            )
             return Screenshot(
                 png_b64=blurred,
                 width=shot.width,

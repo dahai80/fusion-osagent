@@ -1,4 +1,5 @@
 """F5.2 fusion-code visual-debug loop tests (offline, agent mocked)."""
+
 from __future__ import annotations
 
 import base64
@@ -48,10 +49,16 @@ class FakeAgent:
         return self._AR(True, track="ax")
 
     async def assert_changed(self, before=None, expected=None):
-        return self._AR(self._assert_ok, error=None if self._assert_ok else "no change", meta={"changed_ratio": 0.01 if self._assert_ok else 0.0})
+        return self._AR(
+            self._assert_ok,
+            error=None if self._assert_ok else "no change",
+            meta={"changed_ratio": 0.01 if self._assert_ok else 0.0},
+        )
 
     async def screenshot(self):
-        return Screenshot(png_b64=base64.b64encode(b"png-bytes").decode(), width=10, height=10, scale_factor=2.0, node_tree=None)
+        return Screenshot(
+            png_b64=base64.b64encode(b"png-bytes").decode(), width=10, height=10, scale_factor=2.0, node_tree=None
+        )
 
 
 @pytest.mark.asyncio

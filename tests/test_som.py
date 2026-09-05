@@ -1,4 +1,5 @@
 """SOM annotation tests — AX node extraction, mark drawing, index resolution."""
+
 from __future__ import annotations
 
 import base64

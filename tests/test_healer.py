@@ -1,4 +1,5 @@
 """Healer tests — degrade chain: AX-label → ax-role → visual."""
+
 from __future__ import annotations
 
 import pytest
@@ -17,14 +18,8 @@ def _shot(tree: str | None) -> Screenshot:
     return Screenshot(png_b64=SHOT_B64, width=1440, height=900, scale_factor=2.0, node_tree=tree)
 
 
-TREE_LABEL_HIT = (
-    '{"role":"AXWindow","children":['
-    '{"role":"AXButton","label":"OK","frame":[100,100,40,20]}]}'
-)
-TREE_ROLE_HIT = (
-    '{"role":"AXWindow","children":['
-    '{"role":"AXButton","label":"Confirm Submit","frame":[200,200,60,24]}]}'
-)
+TREE_LABEL_HIT = '{"role":"AXWindow","children":[{"role":"AXButton","label":"OK","frame":[100,100,40,20]}]}'
+TREE_ROLE_HIT = '{"role":"AXWindow","children":[{"role":"AXButton","label":"Confirm Submit","frame":[200,200,60,24]}]}'
 
 
 @pytest.mark.asyncio

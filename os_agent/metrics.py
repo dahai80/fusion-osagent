@@ -17,6 +17,7 @@ Design (Rule 5: decide with code, not tokens):
 - Thread-safe via a single Lock; metrics are hot but cheap (dict ops under
   a short critical section). No async lock needed — inc/observe are sync.
 """
+
 from __future__ import annotations
 
 import threading

@@ -105,14 +105,16 @@ import asyncio
 from os_agent.api import DesktopAgent
 from os_agent.config import OsaConfig
 
+
 async def main():
-    agent = DesktopAgent(OsaConfig(stub_mode=True))   # 真实模式：stub_mode=False
+    agent = DesktopAgent(OsaConfig(stub_mode=True))  # 真实模式：stub_mode=False
     shot = await agent.screenshot()
     await agent.click(100.0, 200.0)
-    res = await agent.click_by("OK")        # 双轨：先 AX，视觉兜底
+    res = await agent.click_by("OK")  # 双轨：先 AX，视觉兜底
     await agent.type_text("hello")
     await agent.key("Return", modifiers=["command"])
     await agent.close()
+
 
 asyncio.run(main())
 ```
@@ -140,8 +142,9 @@ API 暴露**单一逻辑点空间**（Apple "points"）。
 
 ```python
 from os_agent.config import points_to_pixels, pixels_to_points
-points_to_pixels(100.0, 200.0, 2.0)   # (200.0, 400.0)
-pixels_to_points(200.0, 400.0, 2.0)   # (100.0, 200.0)
+
+points_to_pixels(100.0, 200.0, 2.0)  # (200.0, 400.0)
+pixels_to_points(200.0, 400.0, 2.0)  # (100.0, 200.0)
 ```
 
 `scale_factor` 自动探测待 executor 暴露能力查询接口（issue E1）；
@@ -207,7 +210,34 @@ D14（真实端到端跑通）受环境门控：7 个集成测试在 `OSA_RUN_IN
 - **幂等回放事务（缺口 5）** —— `os_agent/replay_ledger.py` 按幂等键将已完成步骤序列持久化到 JSONL 账本。`replay(script, idempotency_key=...)` 跳过已标记完成的步骤，崩溃回放**恢复**而非重复执行变更步骤（无双击/双输/重复提交）。`ReplayLedger` 幂等（对已完成 seq 的 `mark_done` 为空操作），按键隔离进度。不传键则原非幂等行为（向后兼容）。
 - **多节点编排（缺口 2）** —— `os_agent/coordination.py` 为共享同一 mlx 集群的 N 个 osagent 节点提供本地优先协调面（无 Redis/etcd——单机 Apple Silicon 机队）：`NodeRegistry` 向 flock 保护的 `nodes.json` 注册/心跳/注销，超 `heartbeat_ttl_s` 的僵尸节点被回收；`ClusterHealth` 跨所有节点聚合 mlx 失败为共享信号，任一节点在**集群**病态时即开路自身熔断，而非仅自身达标才开（4 节点 × 各 5 次自有失败不再 = 集群 20 次命中才有任一开路）。`DesktopAgent` 打 `mlx.node_id`，构造时注册，每周期心跳，`close()` 时注销。`OSA_AGENT_ID` 命名节点；`OSA_CLUSTER_DIR` 重定位状态目录。stub 模式跳过集群接线。
 
-五项缺口的回归测试在 `tests/test_audit0905.py`（指标快照、线程安全注册表、直方图分桶、审计持久化+fail-open、熔断 开路/半开/按速率、幂等回放无双击、账本持久化+键隔离、节点注册表 注册/注销/僵尸回收、集群聚合失败开路、成功裁剪、文件锁可重入）。
+五项缺口的回归测试在 `tests/test_audit0905.py`（指标快照、线程安全注册表、直方图分桶、审计持久化+fail-open、熔断 开路/半开/按速率、幂等回放无双击、账本持久化+键隔离、节点注册表 注册/注销/僵尸回收、集群聚合失败开路、成功裁剪、文件锁非重入）。
+
+### 审计 0905 —— 产品就绪性（六维评审）
+
+产品 + 架构双视角六维评审（功能完整性、架构稳定性、安全风险、性能瓶颈、异常容错、运维配套）判定 osagent **具备受控企业内部生产商用发布条件，暂不具备无约束企业商用 GA 发布条件**。完整报告：`audit/fusion-osagent-audit-result-product-0905.md`。
+
+本轮关闭 1 个 P0 安全旁路与全部新发现 P1/P2/P3：
+
+- **SEC-1（P0）fail-closed 掩码旁路** —— `_mask_impl` 按字符串真值判定空树，`"{}"` / 空子树 JSON 为 truthy → Canvas/Electron 空树场景泄露原始像素（可能含密码框）。改为解析态判定：`tree is None or not tree.children`。
+- **SEC-2（P1）** `som_view` 可视化前先掩码。
+- **SEC-3（P1）** `_FileLock` 重写为 per-path `threading.Lock` + `fcntl.flock`，非重入（闭环跨线程读改写交错丢更新）。
+- **SEC-4（P1）** `NodeRegistry.live_nodes` 过滤已知字段，peer 写额外键不再 TypeError 崩溃全部 reader。
+- **SEC-5（P1）** `ReplayLedger.claim(seq)` 执行前原子占步，闭环 `is_done→execute→mark_done` 并发双执行竞态。
+- **SEC-6（P2）** `audit_log.record` 降为 debug（不泄露 detail）；新增 `query_disk(kind, since)` 读持久化 JSONL。
+- **SEC-7（P2）** `agent_studio.run_graph` 守卫上游返回结构。
+- **SEC-8（P2）** `browser._send_recv` 响应上限 16 MiB + 退避。
+- **ARCH-1（P1）** `code_debug` 在点击前捕获 `before`，`assert_changed` 比对真实点击前/后帧。
+- **ARCH-2（P2）** `autotest.verify` 容错 VLM 超时。
+- **ARCH-3（P3）** planner guard 失败历史记录 `action_ok`。
+- **PERF-1/2（P0）** `masker.mask` / `som.annotate` / `api.som_view` / `mlx.cluster_health` 经 `asyncio.to_thread` 下放，PIL 与文件锁不再阻塞事件循环。
+- **PERF-3（P1）** `image_cache` 解码像素上限 192 MiB（按条目数 + 字节双重 LRU 驱逐），长会话不致 OOM。
+- **PERF-4（P1）** `trajectory.DEFAULT_STEPS` 24 → 6（减少每次点击 RPC）。
+- **PERF-5（P1）** `executor` 超时退避重试。
+- **PERF-6（P2）** 三个缓存均用完整 sha1 hexdigest（原截断 → 脏结果碰撞风险）。
+- **PERF-7（P2）** `vlm_cache.put` 不再缓存 `None`（解析失败）。
+- **OPS-1（P0）** CLI 运维面：`metrics`、`audit query`、`cluster nodes`、`cluster health` 子命令；SIGTERM → 优雅 `close()`（注销节点 + 关闭适配器）。
+
+**判定**：无 P0 阻断；屏障层安全前提成立；容错有界可恢复。剩余到达商用 GA 的缺口为运维级（Prometheus 端点、审计日志轮转、正式 SLO）——列为后续立项，非可用性/安全性硬阻塞。建议路径：当前版本标记 `v1.0-controlled` 面向受控内部生产；运维补齐后发 `v1.1-ga`。
 
 ## 上游依赖
 

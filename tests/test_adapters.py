@@ -1,4 +1,5 @@
 """Adapter contract tests — stub implementations satisfy the Adapter protocol."""
+
 from __future__ import annotations
 
 import pytest

@@ -1,4 +1,5 @@
 """Mask tests — sensitive AX regions blacked out, non-sensitive left intact."""
+
 from __future__ import annotations
 
 import base64
@@ -23,11 +24,7 @@ TREE_WITH_PASSWORD = (
     '{"role":"AXButton","label":"OK","frame":[10,40,40,20]}'
     "]}"
 )
-TREE_PLAIN = (
-    '{"role":"AXWindow","children":['
-    '{"role":"AXButton","label":"OK","frame":[10,40,40,20]}'
-    "]}"
-)
+TREE_PLAIN = '{"role":"AXWindow","children":[{"role":"AXButton","label":"OK","frame":[10,40,40,20]}]}'
 
 
 def _pixel(img_b64: str, x: int, y: int) -> tuple:
