@@ -20,11 +20,13 @@ Coordination is file-based (one state file under ~/.fusion-osagent/cluster/),
 guarded by fcntl.flock. Stale nodes (heartbeat older than ttl) are reaped.
 100% local; no network dependency.
 """
+
 from __future__ import annotations
 
 import fcntl
 import json
 import os
+import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -35,37 +37,47 @@ log = get_logger("os_agent.coordination")
 
 
 def _default_state_dir() -> str:
-    return os.environ.get("OSA_CLUSTER_DIR") or os.path.join(
-        os.path.expanduser("~"), ".fusion-osagent", "cluster"
-    )
+    return os.environ.get("OSA_CLUSTER_DIR") or os.path.join(os.path.expanduser("~"), ".fusion-osagent", "cluster")
 
 
 class _FileLock:
-    """Advisory flock on a sidecar lock file. Reentrant-safe per process via a
-    process-wide set of held paths (a second acquire in the same process is a
-    no-op)."""
+    """Advisory flock on a sidecar lock file.
 
-    _held: set[str] = set()
-    _held_lock = None
+    A per-path threading.Lock serializes entry within the process (so two
+    worker threads calling report_failure concurrently do not interleave
+    read/write and lose updates), and fcntl.flock serializes entry across
+    processes. fcntl.flock is reentrant across fds in the same process on
+    macOS/Linux, but we still hold one in-process lock per path so the
+    read-modify-write inside the critical section is never overlapped by a
+    second thread.
+    """
+
+    _intra_locks: dict[str, threading.Lock] = {}
+    _intra_guard = threading.Lock()
 
     def __init__(self, lock_path: str):
         self.lock_path = lock_path
         self._fh = None
+        with _FileLock._intra_guard:
+            lk = _FileLock._intra_locks.get(lock_path)
+            if lk is None:
+                lk = threading.Lock()
+                _FileLock._intra_locks[lock_path] = lk
+        self._intra = lk
 
     def __enter__(self):
-        if self.lock_path in _FileLock._held:
-            return self
+        self._intra.acquire()
         Path(self.lock_path).parent.mkdir(parents=True, exist_ok=True)
         self._fh = open(self.lock_path, "a+")
         fcntl.flock(self._fh.fileno(), fcntl.LOCK_EX)
-        _FileLock._held.add(self.lock_path)
         return self
 
     def __exit__(self, *exc):
         if self._fh is not None:
             fcntl.flock(self._fh.fileno(), fcntl.LOCK_UN)
             self._fh.close()
-            _FileLock._held.discard(self.lock_path)
+            self._fh = None
+        self._intra.release()
 
 
 @dataclass
@@ -137,7 +149,23 @@ class NodeRegistry:
             if len(live) != len(nodes):
                 data["nodes"] = live
                 self._write(data)
-            return [NodeInfo(**n) for n in live.values()]
+            # P1 fix: filter to known fields before constructing — a peer node
+            # writing an extra key (buggy or malicious) into the shared file
+            # would TypeError-crash every reader.
+            out: list[NodeInfo] = []
+            for n in live.values():
+                try:
+                    out.append(
+                        NodeInfo(
+                            node_id=str(n.get("node_id", "")),
+                            started_at=float(n.get("started_at", 0.0)),
+                            last_heartbeat=float(n.get("last_heartbeat", 0.0)),
+                            meta=dict(n.get("meta") or {}),
+                        )
+                    )
+                except (TypeError, ValueError) as e:
+                    log.warning("live_nodes: skipping malformed node record: %s", e)
+            return out
 
 
 @dataclass
@@ -176,14 +204,19 @@ class ClusterHealth:
             return {"window_failures": len(fails), "cluster_open": len(fails) >= self.open_threshold}
 
     def report_success(self, node_id: str) -> None:
-        # success trims this node's recent failures so a recovering cluster
-        # clears the aggregate signal quickly.
+        # Trim only OUT-OF-WINDOW failures; do NOT drop this node's recent
+        # failures on a single success. A flapping node (9 fail, 1 success,
+        # repeat) used to have its failure count wiped to zero on each success,
+        # so the cluster-level breaker (open_threshold=10) never tripped on it
+        # alone and the struggling cluster kept getting hammered. Recent
+        # failures now persist until they age out of the window, so a high-
+        # failure-rate node actually contributes to the aggregate signal.
         now = time.time()
         with _FileLock(self.lock_path):
             data = self._read()
             fails = data.get("failures", [])
             cutoff = now - self.window_s
-            fails = [f for f in fails if f["ts"] >= cutoff and f["node"] != node_id]
+            fails = [f for f in fails if f["ts"] >= cutoff]
             data["failures"] = fails
             self._write(data)
 

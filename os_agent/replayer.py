@@ -12,6 +12,7 @@ point instead of the recorded fixed coord (F4.2 generalization). guard_kind
 
 No wall-clock / Math.random at module level (Rule 5).
 """
+
 from __future__ import annotations
 
 import json
@@ -83,7 +84,9 @@ class Replayer:
         # agent: DesktopAgent — needs perception, executor, asserter, screenshot
         self.agent = agent
 
-    async def replay_script(self, script, idempotency_key: str | None = None, ledger_path: str | None = None) -> ReplayReport:
+    async def replay_script(
+        self, script, idempotency_key: str | None = None, ledger_path: str | None = None
+    ) -> ReplayReport:
         """Replay a translator.Script.
 
         Gap 5: when `idempotency_key` is given, a ReplayLedger persists each
@@ -97,9 +100,20 @@ class Replayer:
         if ledger:
             report.meta["idempotency_key"] = idempotency_key
         for sstep in script.steps:
-            if ledger is not None and ledger.is_done(sstep.seq):
-                log.info("replay step %d: skipped (already done, idempotent resume)", sstep.seq)
-                report.results.append(StepResult(seq=sstep.seq, verb=sstep.verb, ok=True, guard_kind=sstep.guard_kind, error="skipped: already done"))
+            # P1 fix: claim the seq atomically BEFORE executing. The old
+            # is_done→execute→mark_done window let a concurrent replay with the
+            # same key double-execute a mutating step (double-click/submit).
+            if ledger is not None and not ledger.claim(sstep.seq):
+                log.info("replay step %d: skipped (already claimed/done, idempotent resume)", sstep.seq)
+                report.results.append(
+                    StepResult(
+                        seq=sstep.seq,
+                        verb=sstep.verb,
+                        ok=True,
+                        guard_kind=sstep.guard_kind,
+                        error="skipped: already done",
+                    )
+                )
                 report.passed += 1
                 continue
             res = await self._replay_step(sstep.seq, sstep.verb, sstep.guard_kind, sstep.target_desc, sstep.action)
@@ -114,7 +128,9 @@ class Replayer:
         log.info("replay done: passed=%d failed=%d", report.passed, report.failed)
         return report
 
-    async def replay_recording(self, recording, idempotency_key: str | None = None, ledger_path: str | None = None) -> ReplayReport:
+    async def replay_recording(
+        self, recording, idempotency_key: str | None = None, ledger_path: str | None = None
+    ) -> ReplayReport:
         """Replay a raw recorder.Recording (fixed coords, no guards)."""
         ledger = ReplayLedger(idempotency_key, ledger_path) if idempotency_key else None
         report = ReplayReport(meta=dict(getattr(recording, "meta", {})))
@@ -123,7 +139,9 @@ class Replayer:
         for step in recording.steps:
             if ledger is not None and ledger.is_done(step.seq):
                 log.info("replay-recording step %d: skipped (already done)", step.seq)
-                report.results.append(StepResult(seq=step.seq, verb=step.kind, ok=True, guard_kind="point", error="skipped: already done"))
+                report.results.append(
+                    StepResult(seq=step.seq, verb=step.kind, ok=True, guard_kind="point", error="skipped: already done")
+                )
                 report.passed += 1
                 continue
             action = self._action_from_step(step)
@@ -179,7 +197,14 @@ class Replayer:
             )
         except Exception as e:
             log.error("replay step %d raised: %s", seq, e)
-            return StepResult(seq=seq, verb=verb, ok=False, error=str(e), guard_kind=guard_kind, latency_ms=int((time.monotonic() - t0) * 1000))
+            return StepResult(
+                seq=seq,
+                verb=verb,
+                ok=False,
+                error=str(e),
+                guard_kind=guard_kind,
+                latency_ms=int((time.monotonic() - t0) * 1000),
+            )
 
     async def _capture(self) -> Screenshot | None:
         try:
@@ -218,7 +243,9 @@ class Replayer:
             dst = action.get("drag_to")
             if not src or not dst:
                 return False
-            res = await self.agent.executor.drag(Locator(kind="point", x=src[0], y=src[1]), Locator(kind="point", x=dst[0], y=dst[1]))
+            res = await self.agent.executor.drag(
+                Locator(kind="point", x=src[0], y=src[1]), Locator(kind="point", x=dst[0], y=dst[1])
+            )
             return bool(res.get("ok"))
         if verb in ("drop at", "drag_end"):
             # release half of the drag — already performed by the start step
@@ -229,7 +256,9 @@ class Replayer:
         log.warning("unknown verb in replay: %s", verb)
         return False
 
-    async def _assert(self, before: Screenshot | None, after: Screenshot | None, expected: str) -> tuple[bool, bool, float, str]:
+    async def _assert(
+        self, before: Screenshot | None, after: Screenshot | None, expected: str
+    ) -> tuple[bool, bool, float, str]:
         """Returns (assert_ok, asserted, changed_ratio, error)."""
         if before is None or after is None:
             return False, False, 0.0, "missing frame for assertion"

@@ -14,6 +14,7 @@ goal + recent history, so a changed history → different prompt → miss.
 TTL bounds staleness even if hashes collide (they won't) and lets a repeated
 identical call skip inference for a few seconds. ttl=0 disables the cache.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -47,9 +48,11 @@ class VlmCache:
     def _key(self, model: str, prompt: str, image_b64: str) -> tuple:
         # E3: hash the prompt too — slow_plan prompts embed the full history
         # blob (several KB). Storing the raw string as a dict key wasted memory
-        # and made every get/put hash kilobytes. Same sha1[:16] scheme as image.
-        prompt_hash = hashlib.sha1(prompt.encode("utf-8")).hexdigest()[:16] if prompt else ""
-        img_hash = hashlib.sha1(image_b64.encode("ascii")).hexdigest()[:16] if image_b64 else ""
+        # and made every get/put hash kilobytes. P2 fix: full hexdigest (no
+        # [:16] truncation) — a truncated 16-hex prefix raises collision odds
+        # and a stale-result cache hit on a genuinely different screen.
+        prompt_hash = hashlib.sha1(prompt.encode("utf-8")).hexdigest() if prompt else ""
+        img_hash = hashlib.sha1(image_b64.encode("ascii")).hexdigest() if image_b64 else ""
         return (model, prompt_hash, img_hash)
 
     def get(self, model: str, prompt: str, image_b64: str) -> tuple[dict | None, bool]:
@@ -75,6 +78,11 @@ class VlmCache:
 
     def put(self, model: str, prompt: str, image_b64: str, value: dict | None) -> None:
         if self.ttl <= 0:
+            return
+        # P2 perf fix: do NOT cache a None (parse failure) for a full TTL. A
+        # transient non-JSON model output would otherwise pin None and force
+        # every identical call within TTL to re-fail instead of re-inferring.
+        if value is None:
             return
         k = self._key(model, prompt, image_b64)
         with self._lock:

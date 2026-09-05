@@ -11,6 +11,7 @@ Protocol (local, until upstream issue AT1 fixes a stable JSON contract):
 - read `<dir>/vlm_report.json` (or parse stdout) → DefectVerdict
 - osagent never patches fusion-autotest; only shells out to its CLI.
 """
+
 from __future__ import annotations
 
 import json
@@ -64,6 +65,9 @@ class AutotestLoop:
             except FileNotFoundError as e:
                 log.error("autotest bin missing: %s", e)
                 return DefectVerdict(ok=False, reason=f"autotest bin missing: {e}")
+            except subprocess.TimeoutExpired:
+                log.error("autotest vlm timed out after 120s")
+                return DefectVerdict(ok=False, reason="autotest vlm timed out")
             if proc.returncode != 0:
                 log.error("autotest vlm exit %d: %s", proc.returncode, proc.stderr[:300] if proc.stderr else "")
                 return DefectVerdict(ok=False, reason=f"vlm exit {proc.returncode}")
@@ -74,8 +78,14 @@ class AutotestLoop:
 
     def _run_vlm(self, shot_path: str, prd_path: str, out_dir: str) -> subprocess.CompletedProcess:
         cmd = [
-            self.autotest_bin, "--config", self.config_path,
-            "vlm", shot_path, prd_path, "--output", out_dir,
+            self.autotest_bin,
+            "--config",
+            self.config_path,
+            "vlm",
+            shot_path,
+            prd_path,
+            "--output",
+            out_dir,
         ]
         log.info("autotest vlm: %s", " ".join(cmd))
         return subprocess.run(cmd, capture_output=True, text=True, timeout=120)

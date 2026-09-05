@@ -13,8 +13,10 @@ A1 fix: interactive-node extraction uses the unified ax_tree.collect_interactive
 is no AX tree, marked_b64 is None — never hand the model a mark-less image and
 pretend SOM marks exist.
 """
+
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 from dataclasses import dataclass, field
@@ -69,7 +71,9 @@ class SomAnnotator:
         # B7: only draw + return a marked image when there are real AX marks.
         # With no AX tree, marked_b64 stays None so the Slow core knows SOM is
         # unavailable and reasons over the raw shot instead of phantom marks.
-        marked = self._draw(shot, nodes) if (shot.png_b64 and nodes) else None
+        # P0 perf: _draw does PIL ImageDraw + PNG encode (tens of ms) — offload
+        # to a thread so the event loop keeps serving concurrent captures.
+        marked = await asyncio.to_thread(self._draw, shot, nodes) if (shot.png_b64 and nodes) else None
         if not nodes:
             log.info("SOM: no AX nodes — marked_b64=None (no phantom marks)")
         log.info("SOM: %d nodes marked", len(nodes))
@@ -81,13 +85,15 @@ class SomAnnotator:
             return []
         out: list[SomNode] = []
         for n in ax_tree.collect_interactive(root, max_nodes=max_nodes):
-            out.append(SomNode(
-                index=0,
-                role=n.role,
-                label=n.label or n.title,
-                frame=list(n.frame),
-                ax_identifier=n.identifier,
-            ))
+            out.append(
+                SomNode(
+                    index=0,
+                    role=n.role,
+                    label=n.label or n.title,
+                    frame=list(n.frame),
+                    ax_identifier=n.identifier,
+                )
+            )
         for i, n in enumerate(out, 1):
             n.index = i
         return out
@@ -107,4 +113,3 @@ class SomAnnotator:
         buf = io.BytesIO()
         img.save(buf, format="PNG")
         return base64.b64encode(buf.getvalue()).decode()
-

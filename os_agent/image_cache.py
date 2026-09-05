@@ -16,6 +16,7 @@ order and could raise on CPython. One process currently hosts one
 DesktopAgent, so cross-instance LRU eviction is not a live risk; if multi-
 instance arrives, give each DesktopAgent its own ImageCache instance.
 """
+
 from __future__ import annotations
 
 import base64
@@ -31,9 +32,18 @@ log = get_logger("os_agent.image_cache")
 
 _CACHE: OrderedDict[str, Image.Image] = OrderedDict()
 _MAX_ENTRIES = 8
+# P1 perf: a Retina frame decoded to RGB is ~18MB; an unbounded entry count
+# lets the cache hold hundreds of MB. Cap total held pixels so a long session
+# with many distinct frames cannot grow the cache toward OOM. Eviction is LRU.
+_MAX_BYTES = 192 * 1024 * 1024  # 192 MiB ceiling on decoded pixel memory
 _LOCK = threading.Lock()
 _HITS = 0
 _MISSES = 0
+
+
+def _img_bytes(img) -> int:
+    # decoded PIL RGB size = width * height * bands
+    return img.width * img.height * len(img.getbands())
 
 
 def configure(max_entries: int) -> None:
@@ -50,8 +60,9 @@ def configure(max_entries: int) -> None:
 
 
 def _key(png_b64: str) -> str:
-    # hash the b64 so we don't hold the full string as a dict key
-    return hashlib.sha1(png_b64.encode("ascii")).hexdigest()[:16]
+    # P2 perf: full sha1 hexdigest — the old [:16] truncation raised collision
+    # odds and could return a stale decoded image for a different frame.
+    return hashlib.sha1(png_b64.encode("ascii")).hexdigest()
 
 
 def get_image(png_b64: str) -> Image.Image:
@@ -69,8 +80,12 @@ def get_image(png_b64: str) -> Image.Image:
     with _LOCK:
         _CACHE[k] = img
         _CACHE.move_to_end(k)
-        if len(_CACHE) > _MAX_ENTRIES:
-            _CACHE.popitem(last=False)
+        # evict by entry count AND by total decoded-pixel bytes — whichever
+        # trips first — so the cache cannot grow toward OOM on a long session.
+        total = sum(_img_bytes(v) for v in _CACHE.values())
+        while _CACHE and (len(_CACHE) > _MAX_ENTRIES or total > _MAX_BYTES):
+            _evicted_k, evicted = _CACHE.popitem(last=False)
+            total -= _img_bytes(evicted)
     return img
 
 

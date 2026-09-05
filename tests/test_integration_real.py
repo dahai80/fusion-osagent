@@ -5,6 +5,7 @@ Requires: fusion-mlx running with a VL model loaded
   (~/claude-home/fusion-mlx/start.sh start)
 and API key in ~/.fusion-mlx/settings.json.
 """
+
 from __future__ import annotations
 
 import base64
@@ -44,10 +45,15 @@ def _make_frame(label_text: str = "OK", with_sensitive: bool = False) -> tuple[s
     b64 = base64.b64encode(buf.getvalue()).decode()
     tree = None
     if with_sensitive:
-        tree = json.dumps({"role": "AXWindow", "children": [
-            {"role": "AXSecureTextField", "label": "Password", "frame": [20, 20, 180, 30]},
-            {"role": "AXButton", "label": label_text, "frame": [160, 180, 100, 50]},
-        ]})
+        tree = json.dumps(
+            {
+                "role": "AXWindow",
+                "children": [
+                    {"role": "AXSecureTextField", "label": "Password", "frame": [20, 20, 180, 30]},
+                    {"role": "AXButton", "label": label_text, "frame": [160, 180, 100, 50]},
+                ],
+            }
+        )
     return b64, tree
 
 
@@ -165,7 +171,9 @@ async def test_real_reasoning_slow_escalate():
         img = Image.new("RGB", (400, 300), (250, 250, 250))
         buf = io.BytesIO()
         img.save(buf, format="PNG")
-        shot = Screenshot(png_b64=base64.b64encode(buf.getvalue()).decode(), width=400, height=300, scale_factor=2.0, node_tree=None)
+        shot = Screenshot(
+            png_b64=base64.b64encode(buf.getvalue()).decode(), width=400, height=300, scale_factor=2.0, node_tree=None
+        )
         r = Reasoner(cfg, mlx, som)
         # force low-confidence path by patching the floor high
         r.fast_confidence_floor = 0.95

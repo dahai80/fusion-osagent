@@ -16,6 +16,7 @@ Query modes:
 Iterative walk (no recursion depth risk) with a hard node cap so a 500-node
 window tree cannot blow the stack or cost too much.
 """
+
 from __future__ import annotations
 
 import json
@@ -29,23 +30,51 @@ log = get_logger("os_agent.ax_tree")
 MAX_NODES = 2000
 
 INTERACTIVE_ROLES = {
-    "axbutton", "axcheckbox", "axradio", "axmenuitem", "axmenu", "axcombobox",
-    "axslider", "axtextfield", "axtextarea", "axsecuretextfield", "axlink",
-    "axpopout", "axdisclosure", "axtoolbar", "axtab", "axgrowarea",
+    "axbutton",
+    "axcheckbox",
+    "axradio",
+    "axmenuitem",
+    "axmenu",
+    "axcombobox",
+    "axslider",
+    "axtextfield",
+    "axtextarea",
+    "axsecuretextfield",
+    "axlink",
+    "axpopout",
+    "axdisclosure",
+    "axtoolbar",
+    "axtab",
+    "axgrowarea",
 }
 
 SENSITIVE_ROLES = {
-    "axsecuretextfield", "axpasswordfield", "axsecuretextarea",
+    "axsecuretextfield",
+    "axpasswordfield",
+    "axsecuretextarea",
 }
 
 # Multilingual sensitive label hints (case-insensitive substring/regex).
 SENSITIVE_LABEL_PATTERNS = [
-    r"pass(word|wd)?", r"passwd", r"secret", r"token", r"api[- ]?key",
-    r"credential", r"\bpin\b", r"otp", r"cvv", r"card[- ]?number",
+    r"pass(word|wd)?",
+    r"passwd",
+    r"secret",
+    r"token",
+    r"api[- ]?key",
+    r"credential",
+    r"\bpin\b",
+    r"otp",
+    r"cvv",
+    r"card[- ]?number",
     # CJK / ja / ko
-    "密码", "密碼", "パスワード", "비밀번호", "비번",
+    "密码",
+    "密碼",
+    "パスワード",
+    "비밀번호",
+    "비번",
     # "your secret code" style without the english keywords above
-    "secret code", "access code",
+    "secret code",
+    "access code",
 ]
 _SENSITIVE_RE = re.compile("|".join(SENSITIVE_LABEL_PATTERNS), re.IGNORECASE)
 

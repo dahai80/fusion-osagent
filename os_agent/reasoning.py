@@ -8,6 +8,7 @@ image + full history and returns an ordered sub-step plan.
 Escalation is deterministic code (Rule 5): thresholds + flags, not a second
 model judging the first. Fast success never calls Slow (saves compute).
 """
+
 from __future__ import annotations
 
 import time
@@ -50,7 +51,9 @@ class FastProposal:
 class Reasoner:
     """Fast/Slow dual-core scheduler."""
 
-    def __init__(self, cfg: OsaConfig, mlx, som, masker: SensitiveMasker | None = None, metrics: MetricsRegistry | None = None) -> None:
+    def __init__(
+        self, cfg: OsaConfig, mlx, som, masker: SensitiveMasker | None = None, metrics: MetricsRegistry | None = None
+    ) -> None:
         self.cfg = cfg
         self.mlx = mlx
         self.som = som
@@ -118,7 +121,7 @@ class Reasoner:
         )
         try:
             masked = self.masker.mask(shot)  # F3.5: redact sensitive regions before Fast VLM
-            data = await self._chat_json_cached(prompt, masked.png_b64 or shot.png_b64 or "", self.cfg.fast_model)
+            data = await self._chat_json_cached(prompt, masked.png_b64 or "", self.cfg.fast_model)
         except Exception as e:
             log.error("fast propose failed: %s — force escalate", e)
             return FastProposal(action="none", target="", confidence=0.0, unknown_dialog=True)
@@ -135,7 +138,9 @@ class Reasoner:
     async def _slow_plan(self, query: str, shot: Screenshot, history: list[dict]) -> Reason:
         masked = self.masker.mask(shot)  # F3.5: redact before SOM + Slow VLM
         view = await self.som.annotate(masked)
-        hist_blob = "; ".join(f'step={h.get("step")} action={h.get("action")} ok={h.get("action_ok")}' for h in history[-8:])
+        hist_blob = "; ".join(
+            f"step={h.get('step')} action={h.get('action')} ok={h.get('action_ok')}" for h in history[-8:]
+        )
         prompt = (
             "You are a Slow GUI planner. The Fast core was uncertain or blocked. "
             f"Goal: {query}. Recent history: [{hist_blob}]. "
@@ -146,7 +151,7 @@ class Reasoner:
             "Prefer a mark number from the image when visible."
         )
         try:
-            data = await self._chat_json_cached(prompt, view.marked_b64 or shot.png_b64 or "", self.cfg.slow_model)
+            data = await self._chat_json_cached(prompt, view.marked_b64 or masked.png_b64 or "", self.cfg.slow_model)
         except Exception as e:
             log.exception("slow plan failed")
             return Reason(action="halt", core="slow", escalated=True, rationale=f"slow error: {e}")
@@ -155,7 +160,11 @@ class Reasoner:
             return Reason(action="halt", core="slow", escalated=True, rationale="slow non-JSON")
         sub = data.get("sub_steps") or []
         if isinstance(sub, list):
-            sub = [{"action": str(s.get("action", "")), "target": str(s.get("target", ""))} for s in sub if isinstance(s, dict)]
+            sub = [
+                {"action": str(s.get("action", "")), "target": str(s.get("target", ""))}
+                for s in sub
+                if isinstance(s, dict)
+            ]
         else:
             sub = []
         return Reason(

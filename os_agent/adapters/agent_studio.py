@@ -5,6 +5,7 @@ osagent hand a decomposed plan to agent-studio's runtime over HTTP, and read bac
 the 37 built-in tools registry. Phase 0 only needs the tool-list + a thin execute
 bridge; deeper AgentGraph integration is Phase 2 (pending upstream issues A1/A2/A3).
 """
+
 from __future__ import annotations
 
 from fusion_core import get_async_client, get_logger
@@ -37,7 +38,14 @@ class AgentStudioAdapter:
         client = get_async_client(self._base, timeout=60)
         try:
             r = await client.post("/v1/graph/run", json={"nodes": plan})
-            return r.json()
+            data = r.json()
+            # P3 security: an untrusted/non-conforming upstream could return a
+            # list or a string, which callers index with ["ok"]/["error"] and
+            # would TypeError. Guard the shape before returning.
+            if not isinstance(data, dict):
+                log.error("agent-studio run_graph returned non-dict: %r", type(data))
+                return {"ok": False, "error": f"unexpected response type: {type(data).__name__}"}
+            return data
         except Exception as e:
             log.error("agent-studio run_graph failed: %s", e)
             return {"ok": False, "error": str(e)}

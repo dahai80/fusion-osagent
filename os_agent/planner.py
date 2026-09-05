@@ -10,6 +10,7 @@ Guard predicates take the latest Screenshot + plan state and return
 "target element must be visible". A failed guard triggers heal-then-retry
 once; a second failure halts (Rule 12: fail visibly).
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -54,7 +55,7 @@ class Plan:
     history: list[dict] = field(default_factory=list)
 
     def remaining(self) -> list[Step]:
-        return self.steps[self.cursor:]
+        return self.steps[self.cursor :]
 
 
 def always_true(_shot: Screenshot, _state: dict) -> GuardResult:
@@ -97,7 +98,20 @@ class Planner:
 
         step = plan.steps[plan.cursor]
         guard_res = self.check_guard(step, shot, plan.state)
-        plan.history.append({"step": step.name, "cursor": plan.cursor, "guard": guard_res.ok, "reason": guard_res.reason})
+        # P3 arch fix: record action_ok=False on guard failure. The early
+        # return below used to leave this history entry WITHOUT action_ok, so
+        # _should_escalate (which checks `action_ok is False`) never saw a
+        # guard failure and never escalated it — guard failures were invisible
+        # to escalation logic.
+        plan.history.append(
+            {
+                "step": step.name,
+                "cursor": plan.cursor,
+                "guard": guard_res.ok,
+                "action_ok": False,
+                "reason": guard_res.reason,
+            }
+        )
 
         if not guard_res.ok:
             log.warning("guard failed at step %s: %s — halt", step.name, guard_res.reason)
@@ -152,9 +166,19 @@ class Planner:
                     except Exception as e:
                         log.error("heal callback raised: %s", e)
                         healed = False
-                    log.info("plan %s halted, heal %s retry %d/%d cycle %d/%d", plan.name, "ok" if healed else "failed", retries, self.max_retries, heal_cycles, self.max_heal_cycles)
+                    log.info(
+                        "plan %s halted, heal %s retry %d/%d cycle %d/%d",
+                        plan.name,
+                        "ok" if healed else "failed",
+                        retries,
+                        self.max_retries,
+                        heal_cycles,
+                        self.max_heal_cycles,
+                    )
                 elif heal is not None and heal_cycles >= self.max_heal_cycles:
-                    log.error("plan %s halted, heal cycle budget exhausted (%d) — halt for good", plan.name, heal_cycles)
+                    log.error(
+                        "plan %s halted, heal cycle budget exhausted (%d) — halt for good", plan.name, heal_cycles
+                    )
                     plan.state["halt_reason"] = f"heal cycle budget exhausted ({heal_cycles})"
                     break
                 else:

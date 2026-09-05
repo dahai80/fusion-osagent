@@ -15,6 +15,7 @@ States (deterministic code, Rule 5 — no model judgment):
 
 Thread-safe. One breaker per backend (mlx). Configurable via OsaConfig.
 """
+
 from __future__ import annotations
 
 import threading
@@ -49,6 +50,10 @@ class CircuitBreaker:
         self._opened_at: float = 0.0
         self._consecutive_fail = 0
         self._window: deque[tuple[float, bool]] = deque()  # (ts, ok)
+        # P1 fix: gate half-open so only ONE caller probes the cluster. Without
+        # this, N concurrent callers in half_open all pass allow() and fire real
+        # requests at a still-recovering cluster — defeating the cooldown.
+        self._half_open_probe_in_flight = False
 
     @property
     def state(self) -> str:
@@ -63,17 +68,27 @@ class CircuitBreaker:
         return self._state
 
     def allow(self) -> bool:
-        """Return True if a call may proceed; False (raise) if OPEN."""
+        """Return True if a call may proceed; False (raise) if OPEN.
+
+        In HALF_OPEN only the first caller proceeds (the probe); subsequent
+        callers fast-fail until the probe resolves via on_success/on_failure.
+        """
         with self._lock:
             st = self._effective_state()
             if st == "open":
                 return False
+            if st == "half_open":
+                if self._half_open_probe_in_flight:
+                    return False
+                self._half_open_probe_in_flight = True
+                return True
             return True
 
     def on_success(self) -> None:
         with self._lock:
             self._consecutive_fail = 0
             self._window_append(True)
+            self._half_open_probe_in_flight = False
             if self._state == "half_open":
                 self._state = "closed"
                 log.info("breaker %s: HALF_OPEN -> CLOSED (probe succeeded)", self.name)
@@ -82,6 +97,7 @@ class CircuitBreaker:
         with self._lock:
             self._consecutive_fail += 1
             self._window_append(False)
+            self._half_open_probe_in_flight = False
             if self._state == "half_open":
                 self._open("half-open probe failed")
                 return
@@ -121,4 +137,5 @@ class CircuitBreaker:
             self._state = "closed"
             self._consecutive_fail = 0
             self._opened_at = 0.0
+            self._half_open_probe_in_flight = False
             self._window.clear()

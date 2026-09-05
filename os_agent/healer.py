@@ -13,6 +13,7 @@ no duplicate recursive walkers here. SOM (1.1) is a perception aid for the
 Slow core, not a heal strategy — it overlaps ax-role substring, so it is not a
 separate heal step. Target: >90% self-heal success on UI relayout scenarios.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -92,4 +93,6 @@ def _node_to_locator(node: ax_tree.AxNode, query: str, scale: float, strategy: s
     if not node.has_frame:
         return None
     cx, cy = pixels_to_points(*node.center_px(), scale)
-    return Locator(kind="ax", x=cx, y=cy, ax_role=node.role, ax_label=node.label, raw={"strategy": strategy, "query": query})
+    return Locator(
+        kind="ax", x=cx, y=cy, ax_role=node.role, ax_label=node.label, raw={"strategy": strategy, "query": query}
+    )

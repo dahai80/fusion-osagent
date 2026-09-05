@@ -1,4 +1,5 @@
 """Patch-level crop & zoom tests (Phase 2.3)."""
+
 from __future__ import annotations
 
 import base64
@@ -16,7 +17,13 @@ def _shot(size=(400, 300)) -> Screenshot:
     ImageDraw.Draw(img).rectangle([180, 140, 220, 160], fill=(255, 0, 0))
     buf = io.BytesIO()
     img.save(buf, format="PNG")
-    return Screenshot(png_b64=base64.b64encode(buf.getvalue()).decode(), width=size[0], height=size[1], scale_factor=2.0, node_tree=None)
+    return Screenshot(
+        png_b64=base64.b64encode(buf.getvalue()).decode(),
+        width=size[0],
+        height=size[1],
+        scale_factor=2.0,
+        node_tree=None,
+    )
 
 
 def test_crop_around_center():

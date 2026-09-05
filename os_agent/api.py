@@ -8,6 +8,7 @@ Single logical-point coordinate space. Adapters convert to physical pixels.
 Phase 0: screenshot+click+type+key+scroll+drag+wait via executor, perception
 dual-track for locate. Frame assertion / healing land Phase 1.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -67,13 +68,12 @@ class DesktopAgent:
         self.audit = AuditLog(path=_audit_path or None, agent_id=os.environ.get("OSA_AGENT_ID", "osagent"))
         # A5: size the shared image cache from config (default was a thrashing 8).
         from os_agent import image_cache
+
         image_cache.configure(self.cfg.image_cache_max_entries)
         self.executor: ExecutorAdapter | StubExecutorAdapter = (
             StubExecutorAdapter(self.cfg) if self.cfg.stub_mode else ExecutorAdapter(self.cfg)
         )
-        self.mlx: MlxAdapter | StubMlxAdapter = (
-            StubMlxAdapter(self.cfg) if self.cfg.stub_mode else MlxAdapter(self.cfg)
-        )
+        self.mlx: MlxAdapter | StubMlxAdapter = StubMlxAdapter(self.cfg) if self.cfg.stub_mode else MlxAdapter(self.cfg)
         # Gap 2: multi-node coordination. Stamp this agent's node_id onto mlx
         # (so cluster-health failures are attributed to the right node) and
         # register in the file-shared NodeRegistry so a fleet snapshot shows
@@ -103,7 +103,7 @@ class DesktopAgent:
         self.masker = SensitiveMasker()
         self.perception = Perception(self.cfg, self.executor, self.mlx, self.browser, masker=self.masker)
         self.som = SomAnnotator(self.cfg)
-        self.asserter = FrameAsserter(self.cfg, self.mlx)
+        self.asserter = FrameAsserter(self.cfg, self.mlx, masker=self.masker)
         self.healer = Healer(self.cfg, self.perception)
         self.reasoner = Reasoner(self.cfg, self.mlx, self.som, masker=self.masker, metrics=self.metrics)
         # R6: share the reasoner's vlm_cache with perception so visual locate
@@ -124,13 +124,23 @@ class DesktopAgent:
     async def screenshot(self) -> Screenshot:
         t0 = time.monotonic()
         shot = await self.perception.capture(prefer_ax=True)
-        log.info("screenshot track=%s ax=%s %dms", "ax" if shot.has_ax else "plain", shot.has_ax, int((time.monotonic() - t0) * 1000))
+        log.info(
+            "screenshot track=%s ax=%s %dms",
+            "ax" if shot.has_ax else "plain",
+            shot.has_ax,
+            int((time.monotonic() - t0) * 1000),
+        )
         return shot
 
     async def som_view(self) -> SomView:
         """Capture with AX tree and overlay numbered SOM marks (Phase 1)."""
+        # P1 fix: mask BEFORE annotating — som.annotate draws marks onto the
+        # raw png_b64, so an unmasked capture produces a marked image carrying
+        # raw sensitive pixels. Any caller feeding marked_b64 to a model leaks.
+        # P0 perf: mask() does PIL decode+paint+encode — offload to a thread.
         shot = await self.perception.capture(prefer_ax=True)
-        return await self.som.annotate(shot)
+        masked = await asyncio.to_thread(self.masker.mask, shot)
+        return await self.som.annotate(masked)
 
     async def click(self, x: float, y: float, button: str = "left") -> ActionResult:
         return await self._act("click", Locator(kind="point", x=x, y=y), button=button)
@@ -142,10 +152,24 @@ class DesktopAgent:
             ms = int((time.monotonic() - t0) * 1000)
             err = pr.locator.raw.get("error", "locate failed")
             log.warning("click_by: no coordinates for %r (%s)", query, err)
-            return ActionResult(ok=False, action="click_by", track=pr.track, latency_ms=ms, error=err, meta={"query": query, "confidence": pr.confidence})
+            return ActionResult(
+                ok=False,
+                action="click_by",
+                track=pr.track,
+                latency_ms=ms,
+                error=err,
+                meta={"query": query, "confidence": pr.confidence},
+            )
         res = await self.executor.click(pr.locator, button="left")
         ms = int((time.monotonic() - t0) * 1000)
-        return ActionResult(ok=res.get("ok", False), action="click_by", track=pr.track, latency_ms=ms, error=res.get("error"), meta={"query": query, "confidence": pr.confidence})
+        return ActionResult(
+            ok=res.get("ok", False),
+            action="click_by",
+            track=pr.track,
+            latency_ms=ms,
+            error=res.get("error"),
+            meta={"query": query, "confidence": pr.confidence},
+        )
 
     async def type_text(self, text: str) -> ActionResult:
         return await self._act_raw("type", lambda: self.executor.type_text(text))
@@ -195,17 +219,38 @@ class DesktopAgent:
 
     async def decide(self, query: str, history: list[dict] | None = None) -> Reason:
         """Fast/Slow dual-core: Fast proposes one action; escalate to Slow on low confidence / unknown dialog / failed assert."""
+        # Gap 2: refresh this node's heartbeat each decide cycle so a
+        # long-running agent is not reaped from the fleet registry.
+        await self.heartbeat()
         shot = await self.perception.capture(prefer_ax=True)
         reason = await self.reasoner.decide(query, shot, history)
-        log.info("decide: core=%s action=%s conf=%.2f escalated=%s", reason.core, reason.action, reason.confidence, reason.escalated)
-        self.audit.record("decide", core=reason.core, action=reason.action, confidence=reason.confidence, escalated=reason.escalated, has_ax=shot.has_ax, masked=shot.meta.get("masked"))
+        log.info(
+            "decide: core=%s action=%s conf=%.2f escalated=%s",
+            reason.core,
+            reason.action,
+            reason.confidence,
+            reason.escalated,
+        )
+        self.audit.record(
+            "decide",
+            core=reason.core,
+            action=reason.action,
+            confidence=reason.confidence,
+            escalated=reason.escalated,
+            has_ax=shot.has_ax,
+            masked=shot.meta.get("masked"),
+        )
         return reason
 
-    def crop_zoom(self, shot: Screenshot, center_px: tuple[float, float], half_extent_px: int = 120, upscale: int = 2) -> CropResult | None:
+    def crop_zoom(
+        self, shot: Screenshot, center_px: tuple[float, float], half_extent_px: int = 120, upscale: int = 2
+    ) -> CropResult | None:
         """Patch-level crop & zoom for finer VLM grounding on dense/small controls (Phase 2.3)."""
         return self.crop_zoomer.crop_around(shot, center_px, half_extent_px=half_extent_px, upscale=upscale)
 
-    async def click_humanlike(self, x: float, y: float, start: tuple[float, float] | None = None, traj: TrajectoryConfig | None = None) -> ActionResult:
+    async def click_humanlike(
+        self, x: float, y: float, start: tuple[float, float] | None = None, traj: TrajectoryConfig | None = None
+    ) -> ActionResult:
         """Human-like click: Bezier path to (x,y) then click (F3.1 execution, Phase 3).
 
         N9: when `start` is not given, begin from the last known cursor
@@ -217,12 +262,24 @@ class DesktopAgent:
         path = bezier_path(start, (x, y), traj or TrajectoryConfig(seed=self.cfg.trajectory_seed))
         await self.executor.move_path(path)
         res = await self.executor.click(Locator(kind="point", x=x, y=y), button="left")
-        self._cursor_pos = (x, y)
+        # P3 fix: only advance the tracked cursor on success — a rejected click
+        # never moved the pointer, so claiming it is at (x,y) poisons the next
+        # Bezier path's origin.
+        if res.get("ok"):
+            self._cursor_pos = (x, y)
         ms = int((time.monotonic() - t0) * 1000)
         log.info("click_humanlike: %d waypoints %dms ok=%s", len(path), ms, res.get("ok"))
-        return ActionResult(ok=res.get("ok", False), action="click_humanlike", latency_ms=ms, error=res.get("error"), meta={"waypoints": len(path)})
+        return ActionResult(
+            ok=res.get("ok", False),
+            action="click_humanlike",
+            latency_ms=ms,
+            error=res.get("error"),
+            meta={"waypoints": len(path)},
+        )
 
-    async def replay(self, script_or_recording, idempotency_key: str | None = None, ledger_path: str | None = None) -> ReplayReport:
+    async def replay(
+        self, script_or_recording, idempotency_key: str | None = None, ledger_path: str | None = None
+    ) -> ReplayReport:
         """Replay a Script (F4.2) or Recording (F4.1) with per-step frame assertion (F4.3, Phase 3).
 
         Gap 5: `idempotency_key` enables transactional resume — a re-run with
@@ -236,13 +293,19 @@ class DesktopAgent:
             )
             ledger_path = os.path.join(ledger_path, f"replay-{idempotency_key}.jsonl")
         if isinstance(script_or_recording, Script):
-            report = await self.replayer.replay_script(script_or_recording, idempotency_key=idempotency_key, ledger_path=ledger_path)
+            report = await self.replayer.replay_script(
+                script_or_recording, idempotency_key=idempotency_key, ledger_path=ledger_path
+            )
         elif isinstance(script_or_recording, Recording):
-            report = await self.replayer.replay_recording(script_or_recording, idempotency_key=idempotency_key, ledger_path=ledger_path)
+            report = await self.replayer.replay_recording(
+                script_or_recording, idempotency_key=idempotency_key, ledger_path=ledger_path
+            )
         else:
             raise TypeError(f"replay expects Script or Recording, got {type(script_or_recording).__name__}")
         log.info("replay: passed=%d failed=%d ok=%s key=%s", report.passed, report.failed, report.ok, idempotency_key)
-        self.audit.record("replay", ok=report.ok, passed=report.passed, failed=report.failed, idempotency_key=idempotency_key)
+        self.audit.record(
+            "replay", ok=report.ok, passed=report.passed, failed=report.failed, idempotency_key=idempotency_key
+        )
         return report
 
     async def heal(self, query: str) -> ActionResult:
@@ -273,7 +336,13 @@ class DesktopAgent:
         if self.browser:
             closes.append(self.browser.close())
         closes.append(self.studio.close())
-        results = await asyncio.gather(*closes, return_exceptions=True)
+        # Bound the shutdown so a hung adapter close (stuck UDS recv / mlx
+        # aclose) cannot hang the SIGTERM graceful-close path forever.
+        try:
+            results = await asyncio.wait_for(asyncio.gather(*closes, return_exceptions=True), timeout=10.0)
+        except TimeoutError:
+            log.warning("close timed out after 10s — some adapters may not have closed cleanly")
+            results = []
         for i, r in enumerate(results):
             if isinstance(r, Exception):
                 log.warning("close[%d] raised: %s", i, r)
@@ -310,8 +379,28 @@ class DesktopAgent:
         self.audit.record("action", action_kind=action, ok=bool(res.get("ok")), latency_ms=ms, error=res.get("error"))
         return ActionResult(ok=res.get("ok", False), action=action, latency_ms=ms, error=res.get("error"))
 
+    async def health(self) -> dict:
+        """Aggregate health of mlx + executor + browser. P0 fix: the CLI
+        `health` command only pinged mlx, so a down executor/browser socket
+        reported green. Returns a per-component dict + overall ok.
+        """
+        components = {"mlx": self.mlx.health()}
+        if hasattr(self.executor, "health"):
+            components["executor"] = self.executor.health()
+        if self.browser is not None and hasattr(self.browser, "health"):
+            components["browser"] = self.browser.health()
+        results = {}
+        for name, coro in components.items():
+            try:
+                results[name] = await coro
+            except Exception as e:
+                log.warning("health %s raised: %s", name, e)
+                results[name] = False
+        results["ok"] = all(results.values())
+        return results
+
     def metrics_snapshot(self) -> dict:
-        """E5: export all counters / histograms / cache stats as a JSON-safe dict.
+        """Full production-view metrics in one call.
 
         An external Prometheus exporter or fusion-core monitor scrapes this to
         observe the agent without coupling to internal classes. Includes the
@@ -321,5 +410,21 @@ class DesktopAgent:
         snap = self.metrics.snapshot()
         snap["masker_masked_total"] = getattr(self.masker, "masked_count", 0)
         snap["vlm_cache"] = self.reasoner.vlm_cache.stats()
-        log.info("metrics snapshot: %s", {k: v for k, v in snap.items() if k != "histograms"})
+        # Gap 3/2: surface the circuit breaker + cluster-health state so an
+        # operator scraping metrics can see WHY every click_by fast-fails
+        # (breaker OPEN / cluster OPEN) without reading log lines.
+        breaker = getattr(self.mlx, "breaker", None)
+        if breaker is not None:
+            snap["breaker"] = breaker.snapshot()
+        cluster = getattr(self, "cluster_health", None)
+        if cluster is not None:
+            try:
+                snap["cluster_health"] = cluster.snapshot()
+            except OSError as e:
+                log.warning("cluster snapshot failed: %s", e)
+                snap["cluster_health"] = {"error": str(e)}
+        snap["coordination_enabled"] = getattr(self, "registry", None) is not None
+        # P3 perf: this runs on every scrape; demote the full-digest log to
+        # debug so a high-frequency exporter does not flood the INFO stream.
+        log.debug("metrics snapshot: %s", {k: v for k, v in snap.items() if k != "histograms"})
         return snap

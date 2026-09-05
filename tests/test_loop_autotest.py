@@ -1,4 +1,5 @@
 """F5.3 autotest acceptance loop tests (offline, subprocess mocked)."""
+
 from __future__ import annotations
 
 import json

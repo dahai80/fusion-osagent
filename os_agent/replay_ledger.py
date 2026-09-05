@@ -14,6 +14,7 @@ records each step's seq as it succeeds and persists to JSONL. On resume,
 never blocks the replay itself — Rule 12: fail visibly, don't take down the
 controlled system).
 """
+
 from __future__ import annotations
 
 import json
@@ -61,18 +62,48 @@ class ReplayLedger:
         with self._lock:
             return seq in self._done
 
-    def mark_done(self, seq: int) -> None:
+    def claim(self, seq: int) -> bool:
+        """Atomically claim a seq before execution. Returns True only for the
+        first caller; concurrent callers (same key, same seq) get False and
+        skip. Closes the is_done→execute→mark_done window where two concurrent
+        replays both see is_done=False and double-execute a mutating step.
+        Also persists an `in_progress` record so a crash between claim and
+        mark_done is visible on resume (the step re-runs only if idempotent)."""
         with self._lock:
             if seq in self._done:
-                return
+                return False
             self._done.add(seq)
             if self.path:
                 try:
                     with open(self.path, "a", encoding="utf-8") as fh:
-                        fh.write(json.dumps({"key": self.key, "seq": seq, "status": "done"}, separators=(",", ":")) + "\n")
+                        fh.write(
+                            json.dumps({"key": self.key, "seq": seq, "status": "in_progress"}, separators=(",", ":"))
+                            + "\n"
+                        )
+                except OSError as e:
+                    log.error("replay ledger claim write failed: %s (seq=%d)", e, seq)
+            return True
+
+    def mark_done(self, seq: int) -> None:
+        with self._lock:
+            if self.path:
+                try:
+                    with open(self.path, "a", encoding="utf-8") as fh:
+                        fh.write(
+                            json.dumps({"key": self.key, "seq": seq, "status": "done"}, separators=(",", ":")) + "\n"
+                        )
                 except OSError as e:
                     log.error("replay ledger write failed: %s (seq=%d)", e, seq)
 
     def clear(self) -> None:
+        # P3 fix: also truncate the persisted JSONL, not just the in-memory set.
+        # Otherwise a cleared ledger regrows done entries on the next load.
         with self._lock:
             self._done.clear()
+            if self.path and os.path.exists(self.path):
+                try:
+                    with open(self.path, "w", encoding="utf-8") as fh:
+                        fh.write("")
+                    log.info("replay ledger truncated: %s", self.path)
+                except OSError as e:
+                    log.error("replay ledger truncate failed: %s", e)

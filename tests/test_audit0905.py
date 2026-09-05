@@ -1,4 +1,5 @@
 """Regression tests for the 0905 audit fixes (P0-P3)."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -44,7 +45,7 @@ def test_extract_json_prefers_fenced_block_over_prose():
 
     raw = (
         "Sure, for {reason} I will return the JSON now.\n"
-        "```json\n{\"action\": \"click\", \"target\": \"OK\", \"confidence\": 0.9}\n```"
+        '```json\n{"action": "click", "target": "OK", "confidence": 0.9}\n```'
     )
     obj = _extract_json(raw)
     assert obj is not None
@@ -168,9 +169,9 @@ def test_vlm_cache_key_hashes_prompt():
     k1 = c._key("m", "x" * 5000, "img")
     k2 = c._key("m", "x" * 5000, "img")
     # same prompt content -> same key, but the key tuple must not contain the
-    # raw 5000-char string (it should be a 16-char hash).
+    # raw 5000-char string (it should be a full sha1 hexdigest, 40 chars).
     assert k1 == k2
-    assert isinstance(k1[1], str) and len(k1[1]) == 16
+    assert isinstance(k1[1], str) and len(k1[1]) == 40
 
 
 # E5: inspect_tree must use a longer timeout than a click.
@@ -187,10 +188,7 @@ def test_collect_sensitive_max_nodes_cap():
     from os_agent import ax_tree
 
     # build a tree of many sensitive nodes
-    children = [
-        {"role": "axsecuretextfield", "label": f"pw{i}", "frame": [0, 0, 10, 10]}
-        for i in range(50)
-    ]
+    children = [{"role": "axsecuretextfield", "label": f"pw{i}", "frame": [0, 0, 10, 10]} for i in range(50)]
     tree_json = '{"role":"AXWindow","children":' + str(children).replace("'", '"') + "}"
     root = ax_tree.parse(tree_json)
     capped = ax_tree.collect_sensitive(root, max_nodes=5)
@@ -507,7 +505,9 @@ def test_circuit_breaker_half_open_then_close_on_success():
 def test_circuit_breaker_rate_based_open():
     from os_agent.circuit_breaker import BreakerConfig, CircuitBreaker
 
-    cb = CircuitBreaker(name="t", cfg=BreakerConfig(failure_threshold=100, failure_rate=0.5, min_calls_for_rate=4, window_s=30.0))
+    cb = CircuitBreaker(
+        name="t", cfg=BreakerConfig(failure_threshold=100, failure_rate=0.5, min_calls_for_rate=4, window_s=30.0)
+    )
     # 4 calls, 3 fail -> 75% > 50% with min 4 samples -> open
     cb.on_success()
     cb.on_failure()
@@ -562,10 +562,24 @@ async def test_idempotent_replay_skips_completed_steps(tmp_path):
     rep = Replayer(agent)
     key = "run-001"
     ledger_path = str(tmp_path / "ledger.jsonl")
-    script = Script(steps=[
-        ScriptStep(seq=1, verb="click", target_desc="btn", guard_kind="point", action={"at": [10.0, 20.0], "button": "left"}),
-        ScriptStep(seq=2, verb="click", target_desc="btn2", guard_kind="point", action={"at": [30.0, 40.0], "button": "left"}),
-    ])
+    script = Script(
+        steps=[
+            ScriptStep(
+                seq=1,
+                verb="click",
+                target_desc="btn",
+                guard_kind="point",
+                action={"at": [10.0, 20.0], "button": "left"},
+            ),
+            ScriptStep(
+                seq=2,
+                verb="click",
+                target_desc="btn2",
+                guard_kind="point",
+                action={"at": [30.0, 40.0], "button": "left"},
+            ),
+        ]
+    )
     # first run: both steps execute (2 real clicks)
     r1 = await rep.replay_script(script, idempotency_key=key, ledger_path=ledger_path)
     assert r1.passed == 2
@@ -596,6 +610,7 @@ def test_replay_ledger_persists_and_loads(tmp_path):
 
 
 # ---- Gap 2: multi-node coordination ----
+
 
 def test_node_registry_register_deregister(tmp_path):
     from os_agent.coordination import NodeRegistry
@@ -644,7 +659,11 @@ def test_cluster_health_aggregate_failure_opens(tmp_path):
     assert ch.should_open() is True
 
 
-def test_cluster_health_success_trims_node_failures(tmp_path):
+def test_cluster_health_success_does_not_wipe_recent_failures(tmp_path):
+    # P2 fix: report_success must NOT drop a flapping node's recent failures
+    # on a single success — otherwise a node failing 9x then succeeding 1x
+    # has its aggregate count reset to zero and the cluster breaker (which
+    # opens on aggregate failures) never trips on it alone.
     from os_agent.coordination import ClusterHealth
 
     ch = ClusterHealth(
@@ -656,20 +675,36 @@ def test_cluster_health_success_trims_node_failures(tmp_path):
     ch.report_failure("n1")
     ch.report_failure("n1")
     assert ch.should_open() is True
-    # n1 recovers -> its failures trimmed -> cluster closes
+    # n1 succeeds once — recent failures still in-window, cluster stays OPEN
     ch.report_success("n1")
-    assert ch.should_open() is False
+    assert ch.should_open() is True
 
 
-def test_filelock_reentrant_in_same_process(tmp_path):
+def test_filelock_is_not_reentrant_in_same_process(tmp_path):
+    # P1 fix: _FileLock now serializes same-process entry with a per-path
+    # threading.Lock, so a second acquire on the same path in the same thread
+    # DEADLOCKS rather than silently re-entering. The old reentrancy shortcut
+    # broke thread mutual exclusion (two threads could both hold the lock).
+    # This test asserts the non-reentrant contract: nested acquire must block,
+    # so we run it in a thread and assert it does not acquire within a timeout.
+    import threading
+
     from os_agent.coordination import _FileLock
 
     lp = str(tmp_path / "x.lock")
     lock = _FileLock(lp)
     with lock:
-        # re-acquire in the same process must be a no-op (no deadlock)
-        with _FileLock(lp):
-            pass
+        acquired = threading.Event()
+
+        def _try():
+            with _FileLock(lp):
+                acquired.set()
+
+        t = threading.Thread(target=_try, daemon=True)
+        t.start()
+        t.join(0.5)
+        # second acquire must still be blocked while the outer holds the lock
+        assert not acquired.is_set()
     # after release, a fresh acquire must work
     with _FileLock(lp):
         pass

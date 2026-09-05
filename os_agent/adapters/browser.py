@@ -10,6 +10,7 @@ single session created with the union of needed capabilities, an atomic
 request-id counter (no hardcoded id=1 collision), retry on transient failure,
 and a real close() that closes the session + socket.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -18,6 +19,7 @@ import json
 import socket
 import struct
 import threading
+import time
 
 from fusion_core import get_logger
 
@@ -35,6 +37,10 @@ CAP_ALL = CAP_SCREENSHOT | CAP_CLICK | CAP_TYPE | CAP_SCROLL | CAP_NAVIGATE
 
 RPC_TIMEOUT = 10.0
 RPC_RETRIES = 2
+# P2 security: cap a single RPC response length so a malformed/peer length
+# prefix (up to 4GiB as an unsigned 32-bit) cannot drive _recvn to allocate
+# gigabytes and OOM the agent. 16 MiB is well above any screenshot/AX payload.
+RPC_MAX_RESPONSE = 16 * 1024 * 1024
 
 
 def _recvn(sock: socket.socket, n: int) -> bytes | None:
@@ -53,6 +59,9 @@ def _send_recv(sock: socket.socket, payload: bytes) -> bytes:
     if header is None:
         return b""
     (n,) = struct.unpack(">I", header)
+    if n > RPC_MAX_RESPONSE:
+        # P2: refuse the oversized frame rather than allocating n bytes.
+        raise OSError(f"browser rpc response too large: {n} > {RPC_MAX_RESPONSE}")
     return _recvn(sock, n) or b""
 
 
@@ -93,16 +102,22 @@ class BrowserAdapter:
                     if not raw:
                         last_err = "empty reply"
                         self._reset_sock()
+                        if _attempt < RPC_RETRIES:
+                            time.sleep(0.2 * (_attempt + 1))
                         continue
                     resp = json.loads(raw)
                     if "error" in resp:
                         last_err = str(resp["error"])
+                        if _attempt < RPC_RETRIES:
+                            time.sleep(0.2 * (_attempt + 1))
                         continue
                     log.info("browser rpc %s ok", method)
                     return resp.get("result", {})
                 except (OSError, json.JSONDecodeError) as e:
                     last_err = str(e)
                     self._reset_sock()
+                    if _attempt < RPC_RETRIES:
+                        time.sleep(0.2 * (_attempt + 1))
         log.error("browser rpc %s failed after %d retries: %s", method, RPC_RETRIES, last_err)
         return None
 
@@ -137,6 +152,7 @@ class BrowserAdapter:
         png_b64: str | None = None
         if isinstance(png, (bytes, bytearray)):
             import base64
+
             png_b64 = base64.b64encode(png).decode()
         elif isinstance(png, str):
             png_b64 = png
@@ -169,6 +185,15 @@ class BrowserAdapter:
         self._reset_sock()
         log.info("browser adapter closed")
 
+    async def health(self) -> bool:
+        """Probe the browser UDS socket. P0 fix: CLI health only pinged mlx."""
+        try:
+            sid = await asyncio.wait_for(asyncio.to_thread(self._ensure_session, 0), timeout=RPC_TIMEOUT)
+            return sid is not None
+        except Exception as e:
+            log.warning("browser health failed: %s", e)
+            return False
+
 
 class StubBrowserAdapter:
     name = "browser-stub"
@@ -194,3 +219,6 @@ class StubBrowserAdapter:
 
     async def close(self) -> None:
         log.info("stub browser closed")
+
+    async def health(self) -> bool:
+        return True

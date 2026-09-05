@@ -3,6 +3,7 @@
 Locator: an element target (AX semantic, coordinate, or visual query).
 Screenshot: captured frame + dims + scale, the single coordinate-space carrier.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field

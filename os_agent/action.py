@@ -7,6 +7,7 @@ optional VLM verify catches semantic mismatch ("clicked OK but dialog stayed").
 Integrates into DesktopAgent: each mutating action can be wrapped with
 assert_changed so a silent no-op is never treated as success (Rule 12).
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -35,9 +36,14 @@ class FrameAssertion:
 class FrameAsserter:
     """Pixel-diff frame assertion with optional VLM semantic verify."""
 
-    def __init__(self, cfg: OsaConfig, mlx: MlxAdapter | StubMlxAdapter) -> None:
+    def __init__(self, cfg: OsaConfig, mlx: MlxAdapter | StubMlxAdapter, masker=None) -> None:
         self.cfg = cfg
         self.mlx = mlx
+        # P0 fix: the semantic verifier ships `after.png_b64` to the VLM. A
+        # post-action frame can reveal a sensitive region the pre-action frame
+        # hid (a password field that just became visible, a balance). Mask
+        # before the VLM call so fail-closed holds at the assert path too.
+        self.masker = masker
 
     async def assert_changed(
         self,
@@ -47,7 +53,9 @@ class FrameAsserter:
         threshold: float | None = None,
     ) -> FrameAssertion:
         if not before.png_b64 or not after.png_b64:
-            log.warning("assert_changed: missing frame(s) before=%s after=%s", bool(before.png_b64), bool(after.png_b64))
+            log.warning(
+                "assert_changed: missing frame(s) before=%s after=%s", bool(before.png_b64), bool(after.png_b64)
+            )
             return FrameAssertion(ok=False, changed=False, changed_ratio=0.0, error="missing frame")
         # R4: threshold is configurable (cfg.assert_diff_threshold) so cursor
         # blink / clock-tick false positives and small-highlight false negatives
@@ -103,15 +111,26 @@ class FrameAsserter:
             f"'{expected}'. Look at this screenshot and return ONLY JSON: "
             f'{{"match": true|false, "reason": "<short>"}}.'
         )
+        # P0 fix: mask the post-action frame before VLM verify — fail-closed
+        # masking must hold on the assert path, not only decide/locate.
+        verify_shot = self.masker.mask(after) if self.masker is not None else after
         try:
-            data = await self.mlx.chat_json(prompt, after.png_b64)
+            data = await self.mlx.chat_json(prompt, verify_shot.png_b64)
         except Exception as e:
             # D7 fail-loud: a verifier exception must NOT be masked as success.
             log.warning("semantic verify failed: %s — fail-loud (ok=False)", e)
-            return FrameAssertion(ok=False, changed=True, changed_ratio=ratio, error=f"verify error: {e}", meta={"expected": expected, "verify_error": str(e)})
+            return FrameAssertion(
+                ok=False,
+                changed=True,
+                changed_ratio=ratio,
+                error=f"verify error: {e}",
+                meta={"expected": expected, "verify_error": str(e)},
+            )
         if data is None:
             log.warning("semantic verify: non-JSON response — fail-loud (ok=False)")
-            return FrameAssertion(ok=False, changed=True, changed_ratio=ratio, error="verify error: non-JSON", meta={"expected": expected})
+            return FrameAssertion(
+                ok=False, changed=True, changed_ratio=ratio, error="verify error: non-JSON", meta={"expected": expected}
+            )
         match = bool(data.get("match", False))
         return FrameAssertion(
             ok=match,

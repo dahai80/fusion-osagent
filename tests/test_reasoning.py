@@ -1,4 +1,5 @@
 """Fast/Slow dual-core reasoning tests (Phase 2.1, offline stub)."""
+
 from __future__ import annotations
 
 import pytest
@@ -55,7 +56,13 @@ async def test_fast_accepts_high_confidence():
 async def test_escalates_on_low_confidence():
     mlx = FakeMlx(
         fast_resp={"action": "click", "target": "maybe", "confidence": 0.2, "unknown_dialog": False},
-        slow_resp={"action": "click", "target": "3", "confidence": 0.8, "rationale": "mark 3 is the OK button", "sub_steps": [{"action": "click", "target": "3"}]},
+        slow_resp={
+            "action": "click",
+            "target": "3",
+            "confidence": 0.8,
+            "rationale": "mark 3 is the OK button",
+            "sub_steps": [{"action": "click", "target": "3"}],
+        },
     )
     r = Reasoner(OsaConfig(), mlx, SomAnnotator(OsaConfig()))
     try:
@@ -168,4 +175,3 @@ def test_vlm_cache_disabled_when_ttl_zero():
     val, hit = c.get("m", "p", "img")
     assert hit is False
     assert val is None
-

@@ -107,14 +107,16 @@ import asyncio
 from os_agent.api import DesktopAgent
 from os_agent.config import OsaConfig
 
+
 async def main():
-    agent = DesktopAgent(OsaConfig(stub_mode=True))   # real mode: stub_mode=False
+    agent = DesktopAgent(OsaConfig(stub_mode=True))  # real mode: stub_mode=False
     shot = await agent.screenshot()
     await agent.click(100.0, 200.0)
-    res = await agent.click_by("OK")        # dual-track: AX first, visual fallback
+    res = await agent.click_by("OK")  # dual-track: AX first, visual fallback
     await agent.type_text("hello")
     await agent.key("Return", modifiers=["command"])
     await agent.close()
+
 
 asyncio.run(main())
 ```
@@ -128,13 +130,16 @@ from os_agent.config import OsaConfig
 from os_agent.recorder import ManualEventSource, Recorder
 from os_agent.translator import Translator
 
+
 async def main():
     agent = DesktopAgent(OsaConfig(stub_mode=True))
     # record (manual source here; CGEventTapSource for real capture)
-    src = ManualEventSource([
-        {"kind": "click", "at": [100.0, 200.0], "button": "left"},
-        {"kind": "type", "text": "hello"},
-    ])
+    src = ManualEventSource(
+        [
+            {"kind": "click", "at": [100.0, 200.0], "button": "left"},
+            {"kind": "type", "text": "hello"},
+        ]
+    )
     rec = Recorder(src, capture=lambda: None, clock=lambda: 0.0).record()
     # generalize fixed coords -> semantic script
     script = agent.translator.translate(rec)
@@ -142,6 +147,7 @@ async def main():
     report = await agent.replay(script)
     assert report.ok
     await agent.close()
+
 
 asyncio.run(main())
 ```
@@ -169,8 +175,9 @@ Adapters convert to physical pixels via `scale_factor` (default `2.0` Retina).
 
 ```python
 from os_agent.config import points_to_pixels, pixels_to_points
-points_to_pixels(100.0, 200.0, 2.0)   # (200.0, 400.0)
-pixels_to_points(200.0, 400.0, 2.0)   # (100.0, 200.0)
+
+points_to_pixels(100.0, 200.0, 2.0)  # (200.0, 400.0)
+pixels_to_points(200.0, 400.0, 2.0)  # (100.0, 200.0)
 ```
 
 `scale_factor` auto-detection is pending an upstream executor capability
@@ -370,6 +377,61 @@ persistence + fail-open, breaker open / half-open / rate-based,
 idempotent replay no-double-click, ledger persistence + key isolation,
 node registry register/deregister/stale-reap, cluster aggregate-failure
 opens, success trims, filelock reentrancy).
+
+### audit 0905 — product readiness (six-dimension review)
+
+A product + architecture dual-perspective review across six dimensions
+(functional completeness, architecture stability, security risk,
+performance bottleneck, exception tolerance, ops support) judged osagent
+**ready for controlled internal production, not yet unconstrained
+commercial GA**. Full report: `audit/fusion-osagent-audit-result-product-0905.md`.
+
+This pass closed one P0 security bypass and all newly found P1/P2/P3:
+
+- **SEC-1 (P0) fail-closed masking bypass** — `_mask_impl` gated on the
+  string truthiness of `node_tree`, so a present-but-empty AX tree
+  (`{}`, `{"role":"AXWindow","children":[]}`) common on Canvas/Electron
+  leaked raw pixels (password fields the AX API missed). Gate changed to
+  the parsed tree: `tree is None or not tree.children`.
+- **SEC-2 (P1)** `som_view` now masks before visualizing.
+- **SEC-3 (P1)** `_FileLock` rewritten as per-path `threading.Lock` +
+  `fcntl.flock`, non-reentrant by design (closes cross-thread
+  read-modify-write interleaving that lost cluster-state updates).
+- **SEC-4 (P1)** `NodeRegistry.live_nodes` filters to known fields so a
+  peer writing an extra key no longer TypeError-crashes every reader.
+- **SEC-5 (P1)** `ReplayLedger.claim(seq)` atomically claims a step
+  before execution, closing the `is_done→execute→mark_done` window where
+  concurrent replays double-execute a mutating step.
+- **SEC-6 (P2)** `audit_log.record` demoted to debug (no detail leak);
+  added `query_disk(kind, since)` for the persisted JSONL.
+- **SEC-7 (P2)** `agent_studio.run_graph` guards the upstream response
+  shape.
+- **SEC-8 (P2)** `browser._send_recv` caps response at 16 MiB + backoff.
+- **ARCH-1 (P1)** `code_debug` captures `before` BEFORE the click so
+  `assert_changed` compares a true pre/post frame.
+- **ARCH-2 (P2)** `autotest.verify` tolerates VLM timeout.
+- **ARCH-3 (P3)** planner guard-failure history now records `action_ok`.
+- **PERF-1/2 (P0)** `masker.mask` / `som.annotate` / `api.som_view` /
+  `mlx.cluster_health` offloaded via `asyncio.to_thread` so PIL and file
+  locks no longer block the event loop.
+- **PERF-3 (P1)** `image_cache` capped at 192 MiB decoded pixels (LRU by
+  count AND bytes) to bound a long session toward OOM.
+- **PERF-4 (P1)** `trajectory.DEFAULT_STEPS` 24 → 6 (fewer RPCs/click).
+- **PERF-5 (P1)** `executor` retry backoff on TimeoutError.
+- **PERF-6 (P2)** all three caches use full sha1 hexdigest (was truncated
+  → stale-result collision risk).
+- **PERF-7 (P2)** `vlm_cache.put` no longer caches `None` (parse
+  failures) for the TTL.
+- **OPS-1 (P0)** CLI ops surface: `metrics`, `audit query`, `cluster
+  nodes`, `cluster health` subcommands; SIGTERM → graceful `close()`
+  (deregister node + close adapters).
+
+**Verdict**: no P0 blockers remain; the barrier-layer security premise
+holds; fault tolerance is bounded and recoverable. Remaining gaps to
+commercial GA are ops-grade (Prometheus endpoint, audit log rotation,
+formal SLO) — tracked as follow-up projects, not availability/safety
+hard-blocks. Recommended release path: tag `v1.0-controlled` for
+controlled internal production now; `v1.1-ga` after the ops follow-ups.
 
 ## Upstream dependencies
 

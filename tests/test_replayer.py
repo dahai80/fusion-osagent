@@ -16,7 +16,9 @@ class _FakeAsserter:
         self._ratio = ratio
 
     async def assert_changed(self, before, after, expected=None, threshold=0.0):
-        return FrameAssertion(ok=self._ok, changed=self._ok, changed_ratio=self._ratio, error="" if self._ok else "no change")
+        return FrameAssertion(
+            ok=self._ok, changed=self._ok, changed_ratio=self._ratio, error="" if self._ok else "no change"
+        )
 
 
 class _FakeExecutor:

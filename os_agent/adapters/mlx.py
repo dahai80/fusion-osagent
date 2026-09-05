@@ -1,6 +1,7 @@
 """fusion-mlx adapter: local VLM inference via fusion-core.FusionMLXClient.
 
-Endpoint http://localhost:11434 (OpenAI-compatible), api key dahai168.
+Endpoint http://localhost:11434 (OpenAI-compatible). The api key is resolved
+from FUSION_MLX_API_KEY or ~/.fusion-mlx/settings.json (never hardcoded here).
 Fast/Slow dual-core model selection lives in reasoning.py; this adapter is a
 thin inference wrapper returning raw text/JSON for a given image+prompt.
 
@@ -9,6 +10,7 @@ output cannot be parsed, so callers distinguish "no answer" from a legitimate
 empty object and never silently click (0,0). The stub mirrors the real adapter's
 contract so tests exercise the real parsing path.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -57,8 +59,15 @@ class MlxAdapter:
         # sick, not just when it itself is. node_id set by DesktopAgent.
         self.node_id = "osagent"
         self.cluster_health: ClusterHealth | None = build_cluster_health()
+        # P3 fix: a `_closing` flag stops a concurrent chat_vision from opening
+        # a new client mid-close (close sets _client=None then awaits aclose;
+        # a call entering _ensure during the await would create a never-closed
+        # client).
+        self._closing = False
 
     def _ensure(self) -> FusionMLXClient:
+        if self._closing:
+            raise RuntimeError("mlx adapter is closing")
         if self._client is None:
             log.info("mlx connect url=%s model=%s", self.cfg.fusion_mlx_url, self.model)
             self._client = FusionMLXClient(
@@ -77,7 +86,10 @@ class MlxAdapter:
             raise CircuitOpenError("mlx circuit breaker is open")
         # Gap 2: also fast-fail when the CLUSTER aggregate signal is open —
         # another node may have hit the threshold even if this node did not.
-        if self.cluster_health is not None and self.cluster_health.should_open():
+        # P0 perf: cluster_health.should_open() takes an fcntl flock (blocking
+        # syscall) — run it off the event loop so concurrent inferences are not
+        # stalled behind the flock wait.
+        if self.cluster_health is not None and await asyncio.to_thread(self.cluster_health.should_open):
             log.warning("mlx cluster health OPEN — fast-failing chat_vision")
             self.breaker.on_failure()
             raise CircuitOpenError("mlx cluster health is open")
@@ -101,19 +113,19 @@ class MlxAdapter:
                 )
             self.breaker.on_success()
             if self.cluster_health is not None:
-                self.cluster_health.report_success(self.node_id)
+                await asyncio.to_thread(self.cluster_health.report_success, self.node_id)
             return resp.content.strip()
         except TimeoutError:
             log.error("mlx vision chat timed out after %.1fs model=%s", self.cfg.vlm_timeout, use_model)
             self.breaker.on_failure()
             if self.cluster_health is not None:
-                self.cluster_health.report_failure(self.node_id)
+                await asyncio.to_thread(self.cluster_health.report_failure, self.node_id)
             raise
         except Exception:
             log.exception("mlx vision chat failed")
             self.breaker.on_failure()
             if self.cluster_health is not None:
-                self.cluster_health.report_failure(self.node_id)
+                await asyncio.to_thread(self.cluster_health.report_failure, self.node_id)
             raise
 
     async def chat_json(self, prompt: str, image_b64: str, model: str | None = None) -> dict | None:
@@ -137,6 +149,7 @@ class MlxAdapter:
             return False
 
     async def close(self) -> None:
+        self._closing = True
         client = self._client
         self._client = None
         if client is not None and hasattr(client, "aclose"):

@@ -12,6 +12,7 @@ threads). Fail-open for the audit sink itself: a write error is logged loudly
 but never breaks the agent's action path (Rule 12: fail visibly, but do not
 let the auditor take down the controlled system).
 """
+
 from __future__ import annotations
 
 import json
@@ -65,7 +66,7 @@ class AuditLog:
         with self._lock:
             self._buffer.append(entry)
             if len(self._buffer) > self._buffer_max:
-                self._buffer = self._buffer[-self._buffer_max:]
+                self._buffer = self._buffer[-self._buffer_max :]
             if self.path:
                 try:
                     with open(self.path, "a", encoding="utf-8") as fh:
@@ -73,7 +74,10 @@ class AuditLog:
                 except OSError as e:
                     # fail-open: never break the action path over an audit write
                     log.error("audit log write failed: %s (entry kind=%s)", e, kind)
-        log.info("audit %s: %s", kind, detail)
+        # P2 security: detail may carry a query/coords that should not land in
+        # the general INFO stream (logs are broader-distribution than the
+        # audit JSONL). Demote to debug and emit only a kind+key-count digest.
+        log.debug("audit %s keys=%d", kind, len(detail))
         return entry
 
     def query(self, kind: str | None = None, since: float | None = None) -> list[AuditEntry]:
@@ -88,13 +92,48 @@ class AuditLog:
             out.append(r)
         return out
 
+    def query_disk(self, kind: str | None = None, since: float | None = None) -> list[AuditEntry]:
+        # P2 fix: query() is in-memory only (lost on restart). This reads the
+        # persisted JSONL so the CLI / ops can query the full durable trail.
+        out: list[AuditEntry] = []
+        if not self.path or not os.path.exists(self.path):
+            return out
+        try:
+            with open(self.path, encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                        entry = AuditEntry(
+                            ts=float(rec["ts"]),
+                            agent_id=str(rec.get("agent_id", "")),
+                            kind=str(rec.get("kind", "")),
+                            detail=dict(rec.get("detail") or {}),
+                        )
+                    except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                        continue
+                    if kind is not None and entry.kind != kind:
+                        continue
+                    if since is not None and entry.ts < since:
+                        continue
+                    out.append(entry)
+        except OSError as e:
+            log.error("audit log disk query failed: %s", e)
+        return out
+
     def count(self) -> int:
         with self._lock:
             return len(self._buffer)
 
     def clear(self) -> None:
+        # P2 security: clearing the audit buffer silently wiped integrity
+        # evidence. Log it loudly so a clear is always visible in the trail.
         with self._lock:
+            n = len(self._buffer)
             self._buffer.clear()
+        log.warning("audit buffer cleared (%d entries dropped)", n)
 
 
 def default_path() -> str:

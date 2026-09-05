@@ -1,4 +1,5 @@
 """Frame assertion tests — pixel diff detects change / no-change / semantic verify."""
+
 from __future__ import annotations
 
 import base64
@@ -88,4 +89,3 @@ def test_image_cache_reuses_decoded_image():
     img2 = image_cache.get_image(b64)
     assert img1 is img2  # same object, no re-decode
     assert img1.size == (100, 100)
-

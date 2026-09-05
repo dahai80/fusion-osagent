@@ -15,9 +15,11 @@ offloaded to a worker thread via asyncio.to_thread so the event loop is never
 blocked and asyncio.wait_for / step_timeout_ms can actually interrupt a slow
 gui_action (D1 fix). A per-call timeout + one retry make the adapter robust.
 """
+
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any
 
 from fusion_core import get_logger
@@ -53,6 +55,7 @@ class ExecutorAdapter:
     def _ensure(self) -> Any:
         if self._ex is None:
             from fusion_executor import FusionSandboxExecutor
+
             log.info("executor connect sock=%s", self.cfg.executor_sock)
             self._ex = FusionSandboxExecutor(sock_path=self.cfg.executor_sock)
         return self._ex
@@ -70,13 +73,17 @@ class ExecutorAdapter:
             log.warning("executor step_timeout_ms=%d clamped to %.1fs floor", self.cfg.step_timeout_ms, timeout)
         last_err = None
         for attempt in range(2):  # initial + one retry
+
             def _do() -> dict:
                 res = self._ensure().gui_action(action)
                 return {"ok": res.ok, "error": res.error, "kind": action.get("kind")}
+
             try:
                 res = await asyncio.wait_for(asyncio.to_thread(_do), timeout=timeout)
                 if not res.get("ok"):
-                    log.warning("executor %s failed (attempt %d): %s", action.get("kind"), attempt + 1, res.get("error"))
+                    log.warning(
+                        "executor %s failed (attempt %d): %s", action.get("kind"), attempt + 1, res.get("error")
+                    )
                     last_err = res.get("error")
                     # a logical failure (e.g. "no such element") is not going to
                     # be fixed by retrying — only retry transient transport errors.
@@ -86,10 +93,14 @@ class ExecutorAdapter:
                 last_err = "executor timeout"
                 log.error("executor %s timed out after %.1fs (attempt %d)", action.get("kind"), timeout, attempt + 1)
                 self._ex = None
+                if attempt < 1:
+                    time.sleep(0.3)
             except Exception as e:
                 last_err = str(e)
                 log.error("executor %s raised (attempt %d): %s", action.get("kind"), attempt + 1, e)
                 self._ex = None  # broken connection; force reconnect next call
+                if attempt < 1:
+                    time.sleep(0.3)
         return {"ok": False, "error": last_err or "executor failed", "kind": action.get("kind")}
 
     async def screenshot(self) -> Screenshot:
@@ -133,17 +144,19 @@ class ExecutorAdapter:
         last_err = None
         for attempt in range(2):
             try:
-                return await asyncio.wait_for(
-                    asyncio.to_thread(self._ensure().gui_action, action), timeout=timeout
-                )
+                return await asyncio.wait_for(asyncio.to_thread(self._ensure().gui_action, action), timeout=timeout)
             except TimeoutError:
                 last_err = f"executor timeout: {kind}"
                 log.error("executor %s timed out after %.1fs (attempt %d)", kind, timeout, attempt + 1)
                 self._ex = None
+                if attempt < 1:
+                    time.sleep(0.3)
             except Exception as e:
                 last_err = str(e)
                 log.error("executor %s raised (attempt %d): %s", kind, attempt + 1, e)
                 self._ex = None
+                if attempt < 1:
+                    time.sleep(0.3)
         return _GuiResultError(last_err or f"executor failed: {kind}")
 
     async def click(self, loc: Locator, button: str = "left") -> dict:
@@ -221,6 +234,23 @@ class ExecutorAdapter:
                 log.warning("executor close raised: %s", e)
         log.info("executor adapter closed")
 
+    async def health(self) -> bool:
+        """Probe the executor UDS socket with a no-op screenshot round-trip.
+
+        P0 fix: the CLI `health` command only pinged mlx, so a down
+        fusion-executor socket reported green. A real connect+gui_action
+        confirms the socket is live.
+        """
+        try:
+            res = await asyncio.wait_for(
+                asyncio.to_thread(lambda: self._ensure().gui_action({"kind": KIND_SCREENSHOT})),
+                timeout=max(self.cfg.step_timeout_ms / 1000.0, 5.0),
+            )
+            return bool(getattr(res, "ok", False))
+        except Exception as e:
+            log.warning("executor health failed: %s", e)
+            return False
+
 
 class _GuiResultError:
     """Stand-in GuiResult when the call fails, so attribute access is safe."""
@@ -295,3 +325,6 @@ class StubExecutorAdapter:
 
     async def close(self) -> None:
         log.info("stub executor closed")
+
+    async def health(self) -> bool:
+        return True

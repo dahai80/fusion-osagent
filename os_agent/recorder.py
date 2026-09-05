@@ -13,6 +13,7 @@ Recorder itself is deterministic: it assigns seq, stamps ts from a provided
 clock (pluggable so tests are reproducible), and snapshots the screen through a
 capture callable. No Math.random / wall-clock at module level (Rule 5).
 """
+
 from __future__ import annotations
 
 import json

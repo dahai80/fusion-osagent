@@ -11,8 +11,10 @@ screenshot's physical dimensions; raw-pixel output is rejected as ambiguous
 x=None (D5 fail-loud) — never a (0,0) default that would silently click the
 top-left corner.
 """
+
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 
 from fusion_core import get_logger
@@ -29,8 +31,8 @@ log = get_logger("os_agent.perception")
 
 GROUNDING_PROMPT = (
     "You are a GUI grounding model. Given this screenshot, find the element matching: "
-    "{query}. Return ONLY JSON: {{\"x\": <float 0.0-1.0>, \"y\": <float 0.0-1.0>, "
-    "\"confidence\": <float 0.0-1.0>, \"label\": \"<text>\"}}. "
+    '{query}. Return ONLY JSON: {{"x": <float 0.0-1.0>, "y": <float 0.0-1.0>, '
+    '"confidence": <float 0.0-1.0>, "label": "<text>"}}. '
     "x and y MUST be normalized fractions of image width/height (0.0=top-left, 1.0=bottom-right). "
     "NEVER return pixel counts. Example: center of a 800x600 image is x=0.5, y=0.5."
 )
@@ -152,8 +154,13 @@ class Perception:
     async def _locate_visual(self, query: str, shot: Screenshot) -> Locator:
         if not shot.png_b64:
             log.error("no screenshot for visual locate")
-            return Locator(kind="visual", x=None, y=None, visual_query=query, raw={"confidence": 0.0, "error": "no screenshot"})
-        shot = self.masker.mask(shot)  # F3.5: never feed raw sensitive pixels to VLM
+            return Locator(
+                kind="visual", x=None, y=None, visual_query=query, raw={"confidence": 0.0, "error": "no screenshot"}
+            )
+        # P0 perf: mask() decodes + PIL-paints + re-encodes (tens of ms on a
+        # Retina frame). Run it off the event loop so concurrent captures are
+        # not blocked while PIL works in a thread.
+        shot = await asyncio.to_thread(self.masker.mask, shot)  # F3.5: never feed raw sensitive pixels to VLM
         prompt = GROUNDING_PROMPT.format(query=query)
         # R6: short-circuit identical visual-locate inferences via the shared
         # vlm_cache (same scheme as the reasoner) so replayer guard re-locates
@@ -169,35 +176,59 @@ class Perception:
                 data = await self.mlx.chat_json(prompt, shot.png_b64)
             except Exception as e:
                 log.exception("visual locate mlx failed")
-                return Locator(kind="visual", x=None, y=None, visual_query=query, raw={"confidence": 0.0, "error": str(e)})
+                return Locator(
+                    kind="visual", x=None, y=None, visual_query=query, raw={"confidence": 0.0, "error": str(e)}
+                )
             if self.vlm_cache is not None:
                 self.vlm_cache.put(model, prompt, shot.png_b64 or "", data)
         if data is None:
             log.warning("visual locate: mlx returned no JSON for %r", query)
-            return Locator(kind="visual", x=None, y=None, visual_query=query, raw={"confidence": 0.0, "error": "non-JSON"})
+            return Locator(
+                kind="visual", x=None, y=None, visual_query=query, raw={"confidence": 0.0, "error": "non-JSON"}
+            )
         nx = data.get("x")
         ny = data.get("y")
         conf = float(data.get("confidence", 0.0))
         if nx is None or ny is None:
             log.warning("visual locate: missing x/y for %r", query)
-            return Locator(kind="visual", x=None, y=None, visual_query=query, raw={"confidence": conf, "error": "missing x/y"})
+            return Locator(
+                kind="visual", x=None, y=None, visual_query=query, raw={"confidence": conf, "error": "missing x/y"}
+            )
         try:
             nx = float(nx)
             ny = float(ny)
         except (TypeError, ValueError):
             log.warning("visual locate: non-numeric x/y (%r, %r)", nx, ny)
-            return Locator(kind="visual", x=None, y=None, visual_query=query, raw={"confidence": conf, "error": "non-numeric x/y"})
+            return Locator(
+                kind="visual", x=None, y=None, visual_query=query, raw={"confidence": conf, "error": "non-numeric x/y"}
+            )
         # D4: only accept normalized fractions (0..1). Raw pixel output is
         # ambiguous (which unit? physical vs logical?) — reject loudly rather
         # than guess a conversion. Require both dimensions to validate.
         if not (0.0 <= nx <= 1.0 and 0.0 <= ny <= 1.0):
-            log.warning("visual locate: VLM returned non-normalized coords (%.3f,%.3f) for %r — rejecting", nx, ny, query)
-            return Locator(kind="visual", x=None, y=None, visual_query=query, raw={"confidence": conf, "error": "non-normalized coords"})
+            log.warning(
+                "visual locate: VLM returned non-normalized coords (%.3f,%.3f) for %r — rejecting", nx, ny, query
+            )
+            return Locator(
+                kind="visual",
+                x=None,
+                y=None,
+                visual_query=query,
+                raw={"confidence": conf, "error": "non-normalized coords"},
+            )
         if not (shot.width and shot.height):
             log.warning("visual locate: screenshot has no dimensions; cannot map normalized coords")
-            return Locator(kind="visual", x=None, y=None, visual_query=query, raw={"confidence": conf, "error": "no screenshot dimensions"})
+            return Locator(
+                kind="visual",
+                x=None,
+                y=None,
+                visual_query=query,
+                raw={"confidence": conf, "error": "no screenshot dimensions"},
+            )
         scale = shot.scale_factor or self.cfg.scale_factor
         x = nx * shot.width / scale
         y = ny * shot.height / scale
         log.info("visual locate: query=%r norm=(%.3f,%.3f) point=(%.1f,%.1f) conf=%.2f", query, nx, ny, x, y, conf)
-        return Locator(kind="visual", x=x, y=y, visual_query=query, raw={"confidence": conf, "label": data.get("label")})
+        return Locator(
+            kind="visual", x=x, y=y, visual_query=query, raw={"confidence": conf, "label": data.get("label")}
+        )

@@ -12,6 +12,7 @@ its recorded kind, and the guard is derived from the step's parameters. A
 VLM-describer hook is optional (lazily called when a screenshot is available
 and a describer is supplied) so offline tests stay model-free.
 """
+
 from __future__ import annotations
 
 import json

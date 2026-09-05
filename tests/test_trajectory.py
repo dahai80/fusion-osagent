@@ -1,4 +1,5 @@
 """Human-like trajectory tests (Phase 2.2)."""
+
 from __future__ import annotations
 
 from os_agent.trajectory import TrajectoryConfig, bezier_path, key_jitter_ms
