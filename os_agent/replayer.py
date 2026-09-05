@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from fusion_core import get_logger
 
 from os_agent.adapters.base import Locator, Screenshot
+from os_agent.replay_ledger import ReplayLedger
 
 log = get_logger("os_agent.replayer")
 
@@ -82,29 +83,56 @@ class Replayer:
         # agent: DesktopAgent — needs perception, executor, asserter, screenshot
         self.agent = agent
 
-    async def replay_script(self, script) -> ReplayReport:
-        """Replay a translator.Script."""
+    async def replay_script(self, script, idempotency_key: str | None = None, ledger_path: str | None = None) -> ReplayReport:
+        """Replay a translator.Script.
+
+        Gap 5: when `idempotency_key` is given, a ReplayLedger persists each
+        completed step. A re-run with the same key skips steps already done —
+        so a crashed replay resumes instead of re-executing mutating steps
+        (double-click / double-type / duplicate submit). Without a key the
+        replay is the original non-idempotent behavior (back-compat).
+        """
+        ledger = ReplayLedger(idempotency_key, ledger_path) if idempotency_key else None
         report = ReplayReport(meta=dict(getattr(script, "meta", {})))
+        if ledger:
+            report.meta["idempotency_key"] = idempotency_key
         for sstep in script.steps:
+            if ledger is not None and ledger.is_done(sstep.seq):
+                log.info("replay step %d: skipped (already done, idempotent resume)", sstep.seq)
+                report.results.append(StepResult(seq=sstep.seq, verb=sstep.verb, ok=True, guard_kind=sstep.guard_kind, error="skipped: already done"))
+                report.passed += 1
+                continue
             res = await self._replay_step(sstep.seq, sstep.verb, sstep.guard_kind, sstep.target_desc, sstep.action)
             report.results.append(res)
             if res.ok:
                 report.passed += 1
+                if ledger is not None:
+                    ledger.mark_done(res.seq)
             else:
                 report.failed += 1
             log.info("replay step %d: ok=%s ratio=%.5f err=%s", res.seq, res.ok, res.changed_ratio, res.error)
         log.info("replay done: passed=%d failed=%d", report.passed, report.failed)
         return report
 
-    async def replay_recording(self, recording) -> ReplayReport:
+    async def replay_recording(self, recording, idempotency_key: str | None = None, ledger_path: str | None = None) -> ReplayReport:
         """Replay a raw recorder.Recording (fixed coords, no guards)."""
+        ledger = ReplayLedger(idempotency_key, ledger_path) if idempotency_key else None
         report = ReplayReport(meta=dict(getattr(recording, "meta", {})))
+        if ledger:
+            report.meta["idempotency_key"] = idempotency_key
         for step in recording.steps:
+            if ledger is not None and ledger.is_done(step.seq):
+                log.info("replay-recording step %d: skipped (already done)", step.seq)
+                report.results.append(StepResult(seq=step.seq, verb=step.kind, ok=True, guard_kind="point", error="skipped: already done"))
+                report.passed += 1
+                continue
             action = self._action_from_step(step)
             res = await self._replay_step(step.seq, step.kind, "point", "", action)
             report.results.append(res)
             if res.ok:
                 report.passed += 1
+                if ledger is not None:
+                    ledger.mark_done(res.seq)
             else:
                 report.failed += 1
         log.info("replay-recording done: passed=%d failed=%d", report.passed, report.failed)

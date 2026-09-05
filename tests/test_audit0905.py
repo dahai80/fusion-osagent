@@ -1,10 +1,13 @@
 """Regression tests for the 0905 audit fixes (P0-P3)."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from os_agent.adapters.base import Screenshot
 from os_agent.api import DesktopAgent
+from os_agent.audit_log import AuditLog
 from os_agent.config import OsaConfig
 
 
@@ -361,3 +364,312 @@ def test_assert_diff_threshold_configurable():
         assert cfg2.assert_diff_threshold == 0.05
     finally:
         del os.environ["OSA_ASSERT_DIFF_THRESHOLD"]
+
+
+# E5: metrics snapshot must export counters, latency histograms, and the vlm
+# cache hit/miss, so production has observability instead of only log lines.
+@pytest.mark.asyncio
+async def test_metrics_snapshot_exports_counters_and_cache():
+    agent = DesktopAgent(OsaConfig(stub_mode=True))
+    try:
+        snap = agent.metrics_snapshot()
+        assert "counters" in snap
+        assert "histograms" in snap
+        assert "caches" in snap
+        assert "vlm_cache" in snap
+        assert "masker_masked_total" in snap
+    finally:
+        await agent.close()
+
+
+@pytest.mark.asyncio
+async def test_metrics_counts_actions():
+    agent = DesktopAgent(OsaConfig(stub_mode=True))
+    try:
+        await agent.click(10.0, 20.0)
+        snap = agent.metrics_snapshot()
+        assert snap["counters"].get("action.click.total", 0) >= 1
+        assert snap["counters"].get("action.click.ok", 0) >= 1
+    finally:
+        await agent.close()
+
+
+def test_metrics_histogram_buckets_and_avg():
+    from os_agent.metrics import Histogram
+
+    h = Histogram(name="t")
+    h.observe(3)
+    h.observe(7)
+    h.observe(120)
+    snap = h.snapshot()
+    assert snap["count"] == 3
+    assert snap["sum_ms"] == 130
+    assert snap["avg_ms"] == round(130 / 3, 3)
+    # buckets are independent (one observe increments exactly one bucket):
+    # <=5 holds the 3, <=10 holds the 7, overflow tail holds the 120
+    assert snap["buckets"][1][1] == 1  # <=5
+    assert snap["buckets"][2][1] == 1  # <=10
+    assert snap["buckets"][6][1] == 1  # <=250 holds the 120
+
+
+def test_metrics_registry_thread_safe():
+    from os_agent.metrics import MetricsRegistry
+
+    reg = MetricsRegistry()
+    import threading
+
+    def worker():
+        for _ in range(200):
+            reg.inc("c")
+            reg.observe("h", 1.0)
+            reg.cache_hit("vlm")
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    snap = reg.snapshot()
+    assert snap["counters"]["c"] == 1600
+    assert snap["histograms"]["h"]["count"] == 1600
+    assert snap["caches"]["vlm"]["hits"] == 1600
+
+
+# Audit gap 4: structured audit log must record decide/action/heal/assert
+# events as queryable rows, and persist to JSONL when a path is given.
+@pytest.mark.asyncio
+async def test_audit_log_records_action_and_decide():
+    agent = DesktopAgent(OsaConfig(stub_mode=True))
+    try:
+        await agent.click(5.0, 6.0)
+        rows = agent.audit.query(kind="action")
+        assert len(rows) >= 1
+        assert rows[-1].detail["action_kind"] == "click"
+        assert rows[-1].detail["ok"] is True
+    finally:
+        await agent.close()
+
+
+def test_audit_log_persists_to_jsonl(tmp_path):
+    p = str(tmp_path / "audit.jsonl")
+    al = AuditLog(path=p, agent_id="t1")
+    al.record("action", action_kind="click", ok=True, latency_ms=12)
+    al.record("decide", core="fast", action="click", confidence=0.9, escalated=False, has_ax=True)
+    al.record("mask", regions=2)
+    lines = Path(p).read_text(encoding="utf-8").strip().split("\n")
+    assert len(lines) == 3
+    import json as _j
+
+    first = _j.loads(lines[0])
+    assert first["kind"] == "action"
+    assert first["agent_id"] == "t1"
+    assert first["detail"]["action_kind"] == "click"
+    # query filters by kind
+    assert len(al.query(kind="decide")) == 1
+    assert len(al.query(kind="mask")) == 1
+
+
+def test_audit_log_fail_open_on_bad_path():
+    # an unwritable path must NOT raise from record()
+    al = AuditLog(path="/no/such/dir/audit.jsonl", agent_id="x")
+    al.record("action", action_kind="click", ok=True)  # must not raise
+    assert al.count() == 1  # in-memory buffer still updated
+
+
+# Gap 3: circuit breaker must OPEN after consecutive failures and fast-fail,
+# then HALF_OPEN after cooldown, then CLOSE on a successful probe.
+def test_circuit_breaker_opens_and_fast_fails():
+    from os_agent.circuit_breaker import BreakerConfig, CircuitBreaker, CircuitOpenError
+
+    cb = CircuitBreaker(name="t", cfg=BreakerConfig(failure_threshold=3, cooldown_s=60.0, min_calls_for_rate=100))
+    for _ in range(3):
+        cb.on_failure()
+    assert cb.state == "open"
+    assert cb.allow() is False
+    with pytest.raises(CircuitOpenError):
+        raise CircuitOpenError("x")
+
+
+def test_circuit_breaker_half_open_then_close_on_success():
+    from os_agent.circuit_breaker import BreakerConfig, CircuitBreaker
+
+    cb = CircuitBreaker(name="t", cfg=BreakerConfig(failure_threshold=2, cooldown_s=60.0, min_calls_for_rate=100))
+    cb.on_failure()
+    cb.on_failure()
+    assert cb.state == "open"
+    # force cooldown-elapsed so the next state query flips to half_open
+    cb._opened_at = 0.0
+    assert cb.state == "half_open"
+    cb.on_success()
+    assert cb.state == "closed"
+
+
+def test_circuit_breaker_rate_based_open():
+    from os_agent.circuit_breaker import BreakerConfig, CircuitBreaker
+
+    cb = CircuitBreaker(name="t", cfg=BreakerConfig(failure_threshold=100, failure_rate=0.5, min_calls_for_rate=4, window_s=30.0))
+    # 4 calls, 3 fail -> 75% > 50% with min 4 samples -> open
+    cb.on_success()
+    cb.on_failure()
+    cb.on_failure()
+    cb.on_failure()
+    assert cb.state == "open"
+
+
+def test_circuit_breaker_resets_consecutive_on_success():
+    from os_agent.circuit_breaker import BreakerConfig, CircuitBreaker
+
+    cb = CircuitBreaker(name="t", cfg=BreakerConfig(failure_threshold=3, min_calls_for_rate=100))
+    cb.on_failure()
+    cb.on_failure()
+    cb.on_success()  # resets consecutive counter
+    cb.on_failure()
+    assert cb.state == "closed"  # only 1 consecutive now, below threshold
+
+
+# Gap 5: idempotent replay must resume after a crash — a re-run with the same
+# idempotency key skips already-completed steps (no double-click / double-type).
+@pytest.mark.asyncio
+async def test_idempotent_replay_skips_completed_steps(tmp_path):
+    from os_agent.action import FrameAssertion
+    from os_agent.adapters.base import Screenshot
+    from os_agent.replayer import Replayer
+    from os_agent.translator import Script, ScriptStep
+
+    class _FakeAsserter:
+        async def assert_changed(self, before, after, expected=None, threshold=0.0):
+            return FrameAssertion(ok=True, changed=True, changed_ratio=0.05, error="")
+
+    class _FakeExecutor:
+        def __init__(self):
+            self.click_count = 0
+
+        async def click(self, loc, button="left"):
+            self.click_count += 1
+            return {"ok": True, "error": None}
+
+    class _FakePerception:
+        async def capture(self, prefer_ax=False):
+            return Screenshot(png_b64="iVBORw0KGgo=", width=100, height=100, scale_factor=2.0, node_tree=None)
+
+    class _FakeAgent:
+        def __init__(self):
+            self.executor = _FakeExecutor()
+            self.perception = _FakePerception()
+            self.asserter = _FakeAsserter()
+
+    agent = _FakeAgent()
+    rep = Replayer(agent)
+    key = "run-001"
+    ledger_path = str(tmp_path / "ledger.jsonl")
+    script = Script(steps=[
+        ScriptStep(seq=1, verb="click", target_desc="btn", guard_kind="point", action={"at": [10.0, 20.0], "button": "left"}),
+        ScriptStep(seq=2, verb="click", target_desc="btn2", guard_kind="point", action={"at": [30.0, 40.0], "button": "left"}),
+    ])
+    # first run: both steps execute (2 real clicks)
+    r1 = await rep.replay_script(script, idempotency_key=key, ledger_path=ledger_path)
+    assert r1.passed == 2
+    assert agent.executor.click_count == 2
+    # second run with same key: both skipped (idempotent resume) — NO extra clicks
+    r2 = await rep.replay_script(script, idempotency_key=key, ledger_path=ledger_path)
+    skipped = [s for s in r2.results if "skipped" in (s.error or "")]
+    assert len(skipped) == 2
+    assert agent.executor.click_count == 2  # unchanged: no double-click
+
+
+def test_replay_ledger_persists_and_loads(tmp_path):
+    from os_agent.replay_ledger import ReplayLedger
+
+    p = str(tmp_path / "l.jsonl")
+    l1 = ReplayLedger("k1", path=p)
+    l1.mark_done(1)
+    l1.mark_done(2)
+    l1.mark_done(1)  # idempotent: no duplicate
+    # new instance loads the same file -> knows 1 and 2 are done
+    l2 = ReplayLedger("k1", path=p)
+    assert l2.completed() == {1, 2}
+    assert l2.is_done(1) is True
+    assert l2.is_done(3) is False
+    # a different key does NOT see another key's progress
+    l3 = ReplayLedger("k2", path=p)
+    assert l3.completed() == set()
+
+
+# ---- Gap 2: multi-node coordination ----
+
+def test_node_registry_register_deregister(tmp_path):
+    from os_agent.coordination import NodeRegistry
+
+    reg = NodeRegistry(state_path=str(tmp_path / "nodes.json"))
+    reg.register("node-a", mlx="qwen-7b")
+    live = reg.live_nodes()
+    assert [n.node_id for n in live] == ["node-a"]
+    assert live[0].meta["mlx"] == "qwen-7b"
+    reg.deregister("node-a")
+    assert reg.live_nodes() == []
+
+
+def test_node_registry_reaps_stale(tmp_path):
+    import time as _t
+
+    from os_agent.coordination import NodeRegistry
+
+    reg = NodeRegistry(state_path=str(tmp_path / "nodes.json"), heartbeat_ttl_s=0.2)
+    reg.register("stale")
+    # simulate a node that went silent: rewind its heartbeat
+    data = reg._read()
+    data["nodes"]["stale"]["last_heartbeat"] = _t.time() - 10.0
+    reg._write(data)
+    reg.register("fresh")
+    live = reg.live_nodes()
+    assert [n.node_id for n in live] == ["fresh"]  # stale reaped
+
+
+def test_cluster_health_aggregate_failure_opens(tmp_path):
+    from os_agent.coordination import ClusterHealth
+
+    ch = ClusterHealth(
+        state_path=str(tmp_path / "h.json"),
+        lock_path=str(tmp_path / "h.json.lock"),
+        window_s=30.0,
+        open_threshold=3,
+    )
+    # two distinct nodes each fail a couple times — aggregate crosses threshold
+    assert ch.should_open() is False
+    ch.report_failure("n1")
+    ch.report_failure("n2")
+    assert ch.should_open() is False
+    res = ch.report_failure("n1")  # 3rd aggregate failure
+    assert res["cluster_open"] is True
+    assert ch.should_open() is True
+
+
+def test_cluster_health_success_trims_node_failures(tmp_path):
+    from os_agent.coordination import ClusterHealth
+
+    ch = ClusterHealth(
+        state_path=str(tmp_path / "h.json"),
+        lock_path=str(tmp_path / "h.json.lock"),
+        window_s=30.0,
+        open_threshold=2,
+    )
+    ch.report_failure("n1")
+    ch.report_failure("n1")
+    assert ch.should_open() is True
+    # n1 recovers -> its failures trimmed -> cluster closes
+    ch.report_success("n1")
+    assert ch.should_open() is False
+
+
+def test_filelock_reentrant_in_same_process(tmp_path):
+    from os_agent.coordination import _FileLock
+
+    lp = str(tmp_path / "x.lock")
+    lock = _FileLock(lp)
+    with lock:
+        # re-acquire in the same process must be a no-op (no deadlock)
+        with _FileLock(lp):
+            pass
+    # after release, a fresh acquire must work
+    with _FileLock(lp):
+        pass

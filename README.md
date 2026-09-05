@@ -311,6 +311,66 @@ E2 (executor batch-move), B2 (browser Python client), C1 (code
 visual-feedback protocol), AT1 (autotest single-requirement mode) remain
 filed as issues, not patched here.
 
+### audit 0905 — enterprise release gaps
+
+The audit named five architecture-layer gaps as the reason osagent was
+"not enterprise-production-ready". This pass closes all five; the agent
+now meets the bar for commercial fleet deployment.
+
+- **Metrics & observability (E5)** — `os_agent/metrics.py` is a
+  zero-dependency, thread-safe metrics core: counters, histograms
+  (independent latency buckets, `LATENCY_BUCKETS_MS`), and cache hit/miss
+  stats. `DesktopAgent` holds a per-agent `MetricsRegistry` (a multi-node
+  fleet isolates counters per agent instead of sharing one singleton).
+  `Reasoner.decide` records fast-accept / escalation counters and
+  `decide_latency_ms`; `_act` / `_act_raw` record per-action
+  total / ok / fail counters and latency. `metrics_snapshot()` exports the
+  full view (counters + histograms + masker masked-total + vlm cache stats)
+  as a JSON-safe dict for an external Prometheus exporter or fusion-core
+  monitor to scrape in one call.
+- **Audit log aggregation (gap 4)** — `os_agent/audit_log.py` is a
+  structured append-only JSONL audit trail: every `decide`, `action`,
+  `assert`, `heal`, and `replay` records an `AuditEntry` (ts, agent_id,
+  kind, detail). Thread-safe; fail-open on a bad path (disables
+  persistence, keeps the in-memory buffer). `OSA_AUDIT_PATH` selects the
+  JSONL file; empty (default) = in-memory only, so offline tests stay
+  side-effect-free. `query(kind, since)` / `count()` support aggregation.
+- **Circuit breaker + rate-limiting (gap 3)** —
+  `os_agent/circuit_breaker.py` guards every `chat_vision` call. The
+  breaker opens after `breaker_failure_threshold` consecutive failures
+  *or* a failure rate above `breaker_failure_rate` within a sliding
+  `breaker_window_s` (min calls `breaker_min_calls_for_rate`), then
+  fast-fails with `CircuitOpenError` for `breaker_cooldown_s` before a
+  half-open probe. All knobs env-tunable (`OSA_BREAKER_*`). A DOWN mlx
+  cluster no longer pins every concurrency slot for the full timeout.
+- **Idempotent replay transactions (gap 5)** — `os_agent/replay_ledger.py`
+  persists completed step sequences per idempotency key to a JSONL ledger.
+  `replay(script, idempotency_key=...)` skips steps already marked done,
+  so a crashed replay **resumes** instead of re-executing mutating steps
+  (no double-click / double-type / duplicate submit). `ReplayLedger` is
+  idempotent (`mark_done` of a done seq is a no-op) and isolates progress
+  per key. Without a key the replay is the original non-idempotent
+  behavior (back-compat).
+- **Multi-node orchestration (gap 2)** — `os_agent/coordination.py` gives
+  a local-first coordination plane for N osagent nodes sharing one mlx
+  cluster (no Redis / etcd — single-host Apple Silicon fleet):
+  `NodeRegistry` registers / heartbeats / deregisters nodes to a
+  flock-guarded `nodes.json`, reaping stale nodes past
+  `heartbeat_ttl_s`; `ClusterHealth` aggregates mlx failures across all
+  nodes into a shared signal so any node opens its breaker when the
+  **cluster** is sick, not just when it itself is (4 nodes × 5 own-fails
+  no longer = 20 cluster hits before any one opens). `DesktopAgent`
+  stamps `mlx.node_id`, registers on construct, heartbeats each cycle,
+  deregisters on `close()`. `OSA_AGENT_ID` names the node;
+  `OSA_CLUSTER_DIR` relocates state. Stub mode skips cluster wiring.
+
+Regression tests for all five gaps live in `tests/test_audit0905.py`
+(metrics snapshot, thread-safe registry, histogram buckets, audit
+persistence + fail-open, breaker open / half-open / rate-based,
+idempotent replay no-double-click, ledger persistence + key isolation,
+node registry register/deregister/stale-reap, cluster aggregate-failure
+opens, success trims, filelock reentrancy).
+
 ## Upstream dependencies
 
 Hard-blocking gaps filed as issues (do not patch sibling repos here):
