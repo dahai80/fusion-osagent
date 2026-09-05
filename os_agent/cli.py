@@ -216,6 +216,23 @@ async def _cluster_health() -> int:
     return 0
 
 
+async def _serve_metrics(host: str, port: int, stub: bool) -> int:
+    # GA ops gap 1: long-running Prometheus scrape endpoint. A real scrape needs
+    # a persistent agent that accumulates counters across decide/action cycles;
+    # a fresh agent per request would always read zero. Build one agent, then
+    # serve /metrics from it until killed.
+    from os_agent.prometheus import serve_metrics
+
+    cfg = OsaConfig(stub_mode=stub)
+    agent = DesktopAgent(cfg)
+    _install_sigterm_close(agent)
+    try:
+        await serve_metrics(agent, host=host, port=port)
+        return 0
+    finally:
+        await agent.close()
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(prog="fusion-osagent", description="Desktop Embodied AI barrier layer")
     ap.add_argument("--stub", action="store_true", help="use stub adapters (offline)")
@@ -239,6 +256,9 @@ def main() -> None:
     p_cluster_sub = p_cluster.add_subparsers(dest="cluster_cmd", required=True)
     p_cluster_sub.add_parser("nodes", help="list live osagent nodes")
     p_cluster_sub.add_parser("health", help="cluster-level mlx health")
+    p_serve = sub.add_parser("serve-metrics", help="run a Prometheus scrape endpoint (/metrics)")
+    p_serve.add_argument("--host", default="127.0.0.1", help="bind host (default localhost)")
+    p_serve.add_argument("--port", type=int, default=9100, help="bind port (default 9100)")
     args = ap.parse_args()
 
     if args.cmd == "preflight":
@@ -259,6 +279,8 @@ def main() -> None:
             sys.exit(asyncio.run(_cluster_nodes()))
         if args.cluster_cmd == "health":
             sys.exit(asyncio.run(_cluster_health()))
+    if args.cmd == "serve-metrics":
+        sys.exit(asyncio.run(_serve_metrics(args.host, args.port, args.stub)))
 
 
 if __name__ == "__main__":

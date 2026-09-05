@@ -433,6 +433,36 @@ formal SLO) — tracked as follow-up projects, not availability/safety
 hard-blocks. Recommended release path: tag `v1.0-controlled` for
 controlled internal production now; `v1.1-ga` after the ops follow-ups.
 
+### audit 0905 — GA ops follow-ups (v1.1-ga)
+
+The four ops-grade gaps from the six-dimension review are now closed:
+
+- **GA-1 Prometheus scrape endpoint** — new `os_agent/prometheus.py` renders
+  `metrics_snapshot()` into Prometheus 0.0.4 text format (counters, histograms
+  with `_bucket`/`_sum`/`_count`, cache gauges, breaker/cluster state gauges).
+  Zero-dependency stdlib HTTP server. CLI: `fusion-osagent serve-metrics
+  --host 127.0.0.1 --port 9100` exposes `GET /metrics`. Metric names sanitized
+  (`.`/`-` → `_`) to the `[a-zA-Z_:][a-zA-Z0-9_:]*` grammar.
+- **GA-2 audit log rotation + retention** — `AuditLog` now rotates the active
+  JSONL to a `.{timestamp}` archive when it exceeds `rotate_max_bytes`, then
+  prunes archives by file count (`retention_files`) and age
+  (`retention_days`). Knobs: `OSA_AUDIT_ROTATE_MAX_BYTES` (default 50 MB),
+  `OSA_AUDIT_RETENTION_FILES` (default 10), `OSA_AUDIT_RETENTION_DAYS`
+  (default 30). Rotation is best-effort and fail-open. `0` disables a bound.
+- **GA-3 formal SLO + capacity baseline** — `docs/SLO.md`: latency targets per
+  stage (p50/p95/p99 + hard ceiling), error budget (1% over 30d), availability
+  signals, single-node capacity baseline (2 concurrent VLM inferences, 32 image
+  cache entries, audit disk bounds), multi-node scaling limits, Prometheus
+  alerting rules, and an operational runbook. Valid for the declared models
+  (Qwen2.5-VL-7B/32B 4-bit on MLX).
+- **GA-4 replay_recording claim migration** — `replay_recording` now uses
+  `ReplayLedger.claim(seq)` (atomic pre-execution claim), mirroring
+  `replay_script`. Closes the `is_done→execute→mark_done` window where a
+  concurrent replay with the same idempotency key double-executed a mutating
+  fixed-coord step (double-click/submit).
+
+All four are covered by regression tests in `tests/test_audit0905.py`.
+
 ## Upstream dependencies
 
 Hard-blocking gaps filed as issues (do not patch sibling repos here):

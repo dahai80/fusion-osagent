@@ -65,7 +65,13 @@ class DesktopAgent:
         # actions / decisions). OSA_AUDIT_PATH="" disables persistence;
         # default is in-memory only to keep offline tests side-effect-free.
         _audit_path = os.environ.get("OSA_AUDIT_PATH", "")
-        self.audit = AuditLog(path=_audit_path or None, agent_id=os.environ.get("OSA_AGENT_ID", "osagent"))
+        self.audit = AuditLog(
+            path=_audit_path or None,
+            agent_id=os.environ.get("OSA_AGENT_ID", "osagent"),
+            rotate_max_bytes=self.cfg.audit_rotate_max_bytes,
+            retention_files=self.cfg.audit_retention_files,
+            retention_days=self.cfg.audit_retention_days,
+        )
         # A5: size the shared image cache from config (default was a thrashing 8).
         from os_agent import image_cache
 

@@ -115,6 +115,15 @@ class OsaConfig:
     breaker_failure_rate: float = field(default_factory=lambda: _env_float("OSA_BREAKER_FAILURE_RATE", 0.5))
     breaker_cooldown_s: float = field(default_factory=lambda: _env_float("OSA_BREAKER_COOLDOWN_S", 15.0))
     breaker_min_calls_for_rate: int = field(default_factory=lambda: _env_int("OSA_BREAKER_MIN_CALLS_FOR_RATE", 10))
+    # GA ops: audit JSONL rotation + retention. An unbounded JSONL grows forever
+    # on a long-running agent; enterprise compliance needs a cap + retention.
+    # audit_rotate_max_bytes: rotate when the active file exceeds this (0 = no
+    #   size-based rotation). audit_retention_files: keep at most N rotated
+    #   archives (older ones deleted on rotation). audit_retention_days: drop
+    #   archives older than this many days on rotation (0 = no age pruning).
+    audit_rotate_max_bytes: int = field(default_factory=lambda: _env_int("OSA_AUDIT_ROTATE_MAX_BYTES", 50_000_000))
+    audit_retention_files: int = field(default_factory=lambda: _env_int("OSA_AUDIT_RETENTION_FILES", 10))
+    audit_retention_days: int = field(default_factory=lambda: _env_int("OSA_AUDIT_RETENTION_DAYS", 30))
 
     def __post_init__(self) -> None:
         # P1 fix: clamp/validate env-driven knobs so a misconfigured negative
@@ -156,6 +165,15 @@ class OsaConfig:
             c.breaker_failure_rate = 1.0
         if c.breaker_min_calls_for_rate < 1:
             c.breaker_min_calls_for_rate = 1
+        # GA ops: clamp rotation/retention knobs so a misconfigured negative or
+        # zero value cannot disable retention silently (rotate_max_bytes<=0
+        # would mean never rotate = unbounded growth).
+        if c.audit_rotate_max_bytes < 0:
+            c.audit_rotate_max_bytes = 0
+        if c.audit_retention_files < 0:
+            c.audit_retention_files = 0
+        if c.audit_retention_days < 0:
+            c.audit_retention_days = 0
         if c.scale_factor <= 0:
             log.warning("scale_factor=%s clamped to 2.0", c.scale_factor)
             c.scale_factor = 2.0

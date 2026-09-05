@@ -239,6 +239,17 @@ D14（真实端到端跑通）受环境门控：7 个集成测试在 `OSA_RUN_IN
 
 **判定**：无 P0 阻断；屏障层安全前提成立；容错有界可恢复。剩余到达商用 GA 的缺口为运维级（Prometheus 端点、审计日志轮转、正式 SLO）——列为后续立项，非可用性/安全性硬阻塞。建议路径：当前版本标记 `v1.0-controlled` 面向受控内部生产；运维补齐后发 `v1.1-ga`。
 
+### 审计 0905 —— GA 运维补齐（v1.1-ga）
+
+六维评审的 4 项运维级缺口现已全部闭合：
+
+- **GA-1 Prometheus 采集端点** —— 新增 `os_agent/prometheus.py`，将 `metrics_snapshot()` 转为 Prometheus 0.0.4 文本格式（计数器、直方图 `_bucket`/`_sum`/`_count`、缓存 gauge、熔断/集群状态 gauge）。零依赖 stdlib HTTP 服务。CLI：`fusion-osagent serve-metrics --host 127.0.0.1 --port 9100` 暴露 `GET /metrics`。指标名清洗（`.`/`-` → `_`）以符合 `[a-zA-Z_:][a-zA-Z0-9_:]*` 规则。
+- **GA-2 审计日志轮转 + 留存** —— `AuditLog` 在活动 JSONL 超过 `rotate_max_bytes` 时轮转为 `.{时间戳}` 归档，并按文件数（`retention_files`）和天数（`retention_days`）裁剪归档。配置项：`OSA_AUDIT_ROTATE_MAX_BYTES`（默认 50 MB）、`OSA_AUDIT_RETENTION_FILES`（默认 10）、`OSA_AUDIT_RETENTION_DAYS`（默认 30）。轮转为尽力而为、fail-open。`0` 禁用对应约束。
+- **GA-3 正式 SLO + 容量基线** —— `docs/SLO.md`：各阶段延迟目标（p50/p95/p99 + 硬上限）、错误预算（30 天 1%）、可用性信号、单节点容量基线（2 并发 VLM 推理、32 图像缓存条目、审计磁盘边界）、多节点扩缩上限、Prometheus 告警规则、运维手册。仅对已声明模型（MLX 上 Qwen2.5-VL-7B/32B 4-bit）有效。
+- **GA-4 replay_recording 迁移至 claim** —— `replay_recording` 改用 `ReplayLedger.claim(seq)`（执行前原子抢占），与 `replay_script` 对齐。关闭 `is_done→execute→mark_done` 窗口下相同幂等键的并发重放重复执行变更型固定坐标步骤（重复点击/提交）的竞态。
+
+四项均由 `tests/test_audit0905.py` 回归测试覆盖。
+
 ## 上游依赖
 
 硬阻塞缺口以 issue 上报（不在本仓内补同源仓）：
