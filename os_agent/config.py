@@ -106,6 +106,12 @@ class OsaConfig:
     vlm_timeout: float = field(default_factory=lambda: _env_float("OSA_VLM_TIMEOUT", 60.0))  # seconds; A2 bound on a single mlx inference
     inspect_timeout_ms: int = field(default_factory=lambda: _env_int("OSA_INSPECT_TIMEOUT_MS", 15000))  # E5: AX tree walk needs longer than a click
     trajectory_seed: int | None = field(default_factory=lambda: _env_int("OSA_TRAJECTORY_SEED", 0) or None)  # N10: None = per-target derived seed
+    # Gap 3: circuit breaker knobs for the mlx cluster.
+    breaker_failure_threshold: int = field(default_factory=lambda: _env_int("OSA_BREAKER_FAILURE_THRESHOLD", 5))
+    breaker_window_s: float = field(default_factory=lambda: _env_float("OSA_BREAKER_WINDOW_S", 30.0))
+    breaker_failure_rate: float = field(default_factory=lambda: _env_float("OSA_BREAKER_FAILURE_RATE", 0.5))
+    breaker_cooldown_s: float = field(default_factory=lambda: _env_float("OSA_BREAKER_COOLDOWN_S", 15.0))
+    breaker_min_calls_for_rate: int = field(default_factory=lambda: _env_int("OSA_BREAKER_MIN_CALLS_FOR_RATE", 10))
 
 
 def points_to_pixels(x: float, y: float, scale: float) -> tuple[float, float]:

@@ -11,6 +11,7 @@ dual-track for locate. Frame assertion / healing land Phase 1.
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from dataclasses import dataclass, field
 
@@ -22,12 +23,14 @@ from os_agent.adapters.base import Locator, Screenshot
 from os_agent.adapters.browser import BrowserAdapter, StubBrowserAdapter
 from os_agent.adapters.executor import ExecutorAdapter, StubExecutorAdapter
 from os_agent.adapters.mlx import MlxAdapter, StubMlxAdapter
+from os_agent.audit_log import AuditLog
 from os_agent.config import OsaConfig
 from os_agent.crop_zoom import CropResult, CropZoomer
 from os_agent.healer import Healer
 from os_agent.loops.autotest import AutotestLoop
 from os_agent.loops.code_debug import CodeDebugLoop
 from os_agent.mask import SensitiveMasker
+from os_agent.metrics import MetricsRegistry
 from os_agent.perception import Perception
 from os_agent.reasoning import Reason, Reasoner
 from os_agent.recorder import Recording
@@ -54,6 +57,14 @@ class DesktopAgent:
 
     def __init__(self, cfg: OsaConfig | None = None) -> None:
         self.cfg = cfg or OsaConfig()
+        # E5: per-agent metrics registry so a multi-node fleet can isolate
+        # counters per agent instead of all sharing one module singleton.
+        self.metrics = MetricsRegistry()
+        # Audit gap 4: structured append-only audit trail (masked regions /
+        # actions / decisions). OSA_AUDIT_PATH="" disables persistence;
+        # default is in-memory only to keep offline tests side-effect-free.
+        _audit_path = os.environ.get("OSA_AUDIT_PATH", "")
+        self.audit = AuditLog(path=_audit_path or None, agent_id=os.environ.get("OSA_AGENT_ID", "osagent"))
         # A5: size the shared image cache from config (default was a thrashing 8).
         from os_agent import image_cache
         image_cache.configure(self.cfg.image_cache_max_entries)
@@ -63,6 +74,24 @@ class DesktopAgent:
         self.mlx: MlxAdapter | StubMlxAdapter = (
             StubMlxAdapter(self.cfg) if self.cfg.stub_mode else MlxAdapter(self.cfg)
         )
+        # Gap 2: multi-node coordination. Stamp this agent's node_id onto mlx
+        # (so cluster-health failures are attributed to the right node) and
+        # register in the file-shared NodeRegistry so a fleet snapshot shows
+        # who is live. Stub mode skips cluster wiring (no real mlx, no fleet).
+        self.node_id = os.environ.get("OSA_AGENT_ID", f"osagent-{os.getpid()}")
+        from os_agent.coordination import NodeRegistry, build_cluster_health
+
+        self.cluster_health = None if self.cfg.stub_mode else build_cluster_health()
+        self.registry = NodeRegistry()
+        if not self.cfg.stub_mode:
+            self.mlx.node_id = self.node_id
+            if self.cluster_health is not None:
+                self.mlx.cluster_health = self.cluster_health
+            try:
+                self.registry.register(self.node_id, mlx=self.mlx.model)
+            except OSError as e:
+                log.warning("node register failed (coordination disabled): %s", e)
+                self.registry = None
         self.browser: BrowserAdapter | StubBrowserAdapter | None = (
             StubBrowserAdapter(self.cfg) if self.cfg.stub_mode else BrowserAdapter(self.cfg)
         )
@@ -76,7 +105,7 @@ class DesktopAgent:
         self.som = SomAnnotator(self.cfg)
         self.asserter = FrameAsserter(self.cfg, self.mlx)
         self.healer = Healer(self.cfg, self.perception)
-        self.reasoner = Reasoner(self.cfg, self.mlx, self.som, masker=self.masker)
+        self.reasoner = Reasoner(self.cfg, self.mlx, self.som, masker=self.masker, metrics=self.metrics)
         # R6: share the reasoner's vlm_cache with perception so visual locate
         # also skips re-inference on an unchanged screen.
         self.perception.vlm_cache = self.reasoner.vlm_cache
@@ -155,6 +184,7 @@ class DesktopAgent:
         after = await self.perception.capture(prefer_ax=False)
         fa = await self.asserter.assert_changed(before, after, expected=expected)
         log.info("assert_changed: ok=%s ratio=%.5f err=%s", fa.ok, fa.changed_ratio, fa.error)
+        self.audit.record("assert", ok=fa.ok, changed_ratio=fa.changed_ratio, expected=expected)
         return ActionResult(
             ok=fa.ok,
             action="assert",
@@ -168,6 +198,7 @@ class DesktopAgent:
         shot = await self.perception.capture(prefer_ax=True)
         reason = await self.reasoner.decide(query, shot, history)
         log.info("decide: core=%s action=%s conf=%.2f escalated=%s", reason.core, reason.action, reason.confidence, reason.escalated)
+        self.audit.record("decide", core=reason.core, action=reason.action, confidence=reason.confidence, escalated=reason.escalated, has_ax=shot.has_ax, masked=shot.meta.get("masked"))
         return reason
 
     def crop_zoom(self, shot: Screenshot, center_px: tuple[float, float], half_extent_px: int = 120, upscale: int = 2) -> CropResult | None:
@@ -191,21 +222,34 @@ class DesktopAgent:
         log.info("click_humanlike: %d waypoints %dms ok=%s", len(path), ms, res.get("ok"))
         return ActionResult(ok=res.get("ok", False), action="click_humanlike", latency_ms=ms, error=res.get("error"), meta={"waypoints": len(path)})
 
-    async def replay(self, script_or_recording) -> ReplayReport:
-        """Replay a Script (F4.2) or Recording (F4.1) with per-step frame assertion (F4.3, Phase 3)."""
+    async def replay(self, script_or_recording, idempotency_key: str | None = None, ledger_path: str | None = None) -> ReplayReport:
+        """Replay a Script (F4.2) or Recording (F4.1) with per-step frame assertion (F4.3, Phase 3).
+
+        Gap 5: `idempotency_key` enables transactional resume — a re-run with
+        the same key skips steps already persisted to the ledger, so a crashed
+        replay resumes instead of re-executing mutating steps. `ledger_path`
+        defaults to ~/.fusion-osagent/replay/<key>.jsonl when a key is given.
+        """
+        if ledger_path is None and idempotency_key:
+            ledger_path = os.environ.get("OSA_REPLAY_LEDGER_DIR") or os.path.join(
+                os.path.expanduser("~"), ".fusion-osagent", "replay"
+            )
+            ledger_path = os.path.join(ledger_path, f"replay-{idempotency_key}.jsonl")
         if isinstance(script_or_recording, Script):
-            report = await self.replayer.replay_script(script_or_recording)
+            report = await self.replayer.replay_script(script_or_recording, idempotency_key=idempotency_key, ledger_path=ledger_path)
         elif isinstance(script_or_recording, Recording):
-            report = await self.replayer.replay_recording(script_or_recording)
+            report = await self.replayer.replay_recording(script_or_recording, idempotency_key=idempotency_key, ledger_path=ledger_path)
         else:
             raise TypeError(f"replay expects Script or Recording, got {type(script_or_recording).__name__}")
-        log.info("replay: passed=%d failed=%d ok=%s", report.passed, report.failed, report.ok)
+        log.info("replay: passed=%d failed=%d ok=%s key=%s", report.passed, report.failed, report.ok, idempotency_key)
+        self.audit.record("replay", ok=report.ok, passed=report.passed, failed=report.failed, idempotency_key=idempotency_key)
         return report
 
     async def heal(self, query: str) -> ActionResult:
         """Multi-locator self-healing: AX-label → AX-role → SOM → visual."""
         hr = await self.healer.heal(query)
         log.info("heal: ok=%s strategy=%s query=%r", hr.ok, hr.strategy, query)
+        self.audit.record("heal", ok=hr.ok, strategy=hr.strategy, attempts=hr.attempts)
         return ActionResult(
             ok=hr.ok,
             action="heal",
@@ -213,6 +257,16 @@ class DesktopAgent:
             error=hr.error,
             meta={"query": query, "attempts": hr.attempts},
         )
+
+    async def heartbeat(self) -> None:
+        """Gap 2: refresh this node's heartbeat in the registry so live_nodes()
+        does not reap a long-running agent. Call periodically (e.g. each decide
+        cycle). Fail-open: registry unavailable = no-op."""
+        if getattr(self, "registry", None) is not None:
+            try:
+                self.registry.heartbeat(self.node_id)
+            except OSError as e:
+                log.warning("heartbeat failed: %s", e)
 
     async def close(self) -> None:
         closes = [self.executor.close(), self.mlx.close()]
@@ -223,6 +277,12 @@ class DesktopAgent:
         for i, r in enumerate(results):
             if isinstance(r, Exception):
                 log.warning("close[%d] raised: %s", i, r)
+        # Gap 2: deregister so the fleet snapshot no longer lists this node.
+        if getattr(self, "registry", None) is not None:
+            try:
+                self.registry.deregister(self.node_id)
+            except OSError as e:
+                log.warning("deregister failed: %s", e)
         log.info("DesktopAgent closed")
 
     async def _act(self, action: str, loc: Locator, **kw) -> ActionResult:
@@ -234,10 +294,32 @@ class DesktopAgent:
         else:
             res = {"ok": False, "error": f"unknown action {action}"}
         ms = int((time.monotonic() - t0) * 1000)
+        self.metrics.inc(f"action.{action}.total")
+        self.metrics.inc(f"action.{action}.ok" if res.get("ok") else f"action.{action}.fail")
+        self.metrics.observe(f"action.{action}.latency_ms", ms)
+        self.audit.record("action", action_kind=action, ok=bool(res.get("ok")), latency_ms=ms, error=res.get("error"))
         return ActionResult(ok=res.get("ok", False), action=action, latency_ms=ms, error=res.get("error"))
 
     async def _act_raw(self, action: str, fn) -> ActionResult:
         t0 = time.monotonic()
         res = await fn()
         ms = int((time.monotonic() - t0) * 1000)
+        self.metrics.inc(f"action.{action}.total")
+        self.metrics.inc(f"action.{action}.ok" if res.get("ok") else f"action.{action}.fail")
+        self.metrics.observe(f"action.{action}.latency_ms", ms)
+        self.audit.record("action", action_kind=action, ok=bool(res.get("ok")), latency_ms=ms, error=res.get("error"))
         return ActionResult(ok=res.get("ok", False), action=action, latency_ms=ms, error=res.get("error"))
+
+    def metrics_snapshot(self) -> dict:
+        """E5: export all counters / histograms / cache stats as a JSON-safe dict.
+
+        An external Prometheus exporter or fusion-core monitor scrapes this to
+        observe the agent without coupling to internal classes. Includes the
+        masker's masked-region count + the reasoner vlm cache stats so the
+        snapshot is a complete production-view in one call.
+        """
+        snap = self.metrics.snapshot()
+        snap["masker_masked_total"] = getattr(self.masker, "masked_count", 0)
+        snap["vlm_cache"] = self.reasoner.vlm_cache.stats()
+        log.info("metrics snapshot: %s", {k: v for k, v in snap.items() if k != "histograms"})
+        return snap

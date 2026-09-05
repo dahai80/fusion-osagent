@@ -16,7 +16,9 @@ import json
 
 from fusion_core import FusionMLXClient, get_logger
 
+from os_agent.circuit_breaker import BreakerConfig, CircuitBreaker, CircuitOpenError
 from os_agent.config import OsaConfig
+from os_agent.coordination import ClusterHealth, build_cluster_health
 
 log = get_logger("os_agent.adapters.mlx")
 
@@ -33,6 +35,28 @@ class MlxAdapter:
         # mlx cluster) otherwise fire N×M simultaneous requests → mlx OOM.
         # The semaphore serializes at the inference boundary only.
         self._semaphore = asyncio.Semaphore(max(1, cfg.vlm_concurrency))
+        # Gap 3: cluster-level circuit breaker. A4 bounds concurrency but a
+        # DOWN mlx cluster still gets every request fired at it (each waiting
+        # the full timeout, pinning every slot). The breaker opens after
+        # consecutive failures / high failure rate and fast-fails until the
+        # cluster cools down — protects the cluster, not just this instance.
+        self.breaker = CircuitBreaker(
+            name="mlx",
+            cfg=BreakerConfig(
+                failure_threshold=cfg.breaker_failure_threshold,
+                window_s=cfg.breaker_window_s,
+                failure_rate=cfg.breaker_failure_rate,
+                cooldown_s=cfg.breaker_cooldown_s,
+                min_calls_for_rate=cfg.breaker_min_calls_for_rate,
+            ),
+        )
+        # Gap 2: cluster-level health. Per-instance breaker only sees this
+        # node's failures; N nodes each below their own threshold still flood a
+        # struggling cluster. The shared ClusterHealth aggregates failures
+        # across all nodes on this host so any node opens when the CLUSTER is
+        # sick, not just when it itself is. node_id set by DesktopAgent.
+        self.node_id = "osagent"
+        self.cluster_health: ClusterHealth | None = build_cluster_health()
 
     def _ensure(self) -> FusionMLXClient:
         if self._client is None:
@@ -45,6 +69,18 @@ class MlxAdapter:
         return self._client
 
     async def chat_vision(self, prompt: str, image_b64: str, model: str | None = None) -> str:
+        # Gap 3: fast-fail when the local breaker is OPEN instead of firing
+        # another request at a down cluster and pinning a slot for the full
+        # timeout.
+        if not self.breaker.allow():
+            log.warning("mlx breaker OPEN — fast-failing chat_vision")
+            raise CircuitOpenError("mlx circuit breaker is open")
+        # Gap 2: also fast-fail when the CLUSTER aggregate signal is open —
+        # another node may have hit the threshold even if this node did not.
+        if self.cluster_health is not None and self.cluster_health.should_open():
+            log.warning("mlx cluster health OPEN — fast-failing chat_vision")
+            self.breaker.on_failure()
+            raise CircuitOpenError("mlx cluster health is open")
         client = self._ensure()
         use_model = model or self.model
         content = [
@@ -63,12 +99,21 @@ class MlxAdapter:
                     client.chat(messages=[{"role": "user", "content": content}], model=use_model),
                     timeout=self.cfg.vlm_timeout,
                 )
+            self.breaker.on_success()
+            if self.cluster_health is not None:
+                self.cluster_health.report_success(self.node_id)
             return resp.content.strip()
         except TimeoutError:
             log.error("mlx vision chat timed out after %.1fs model=%s", self.cfg.vlm_timeout, use_model)
+            self.breaker.on_failure()
+            if self.cluster_health is not None:
+                self.cluster_health.report_failure(self.node_id)
             raise
         except Exception:
             log.exception("mlx vision chat failed")
+            self.breaker.on_failure()
+            if self.cluster_health is not None:
+                self.cluster_health.report_failure(self.node_id)
             raise
 
     async def chat_json(self, prompt: str, image_b64: str, model: str | None = None) -> dict | None:

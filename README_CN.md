@@ -197,6 +197,18 @@ D14（真实端到端跑通）受环境门控：7 个集成测试在 `OSA_RUN_IN
 
 上游阻塞不变：E1（executor scale_factor/能力查询）、E2（executor 批量 move）、B2（browser Python 客户端）、C1（code 视觉回喂协议）、AT1（autotest 单需求模式）仍以 issue 上报，不在本仓内修补。
 
+### 审计 0905 —— 企业发布缺口
+
+审计将五处架构层缺口列为 osagent"不可企业级生产商用发布"的原因。本轮全部关闭，agent 达到商用机队部署标准。
+
+- **指标与可观测性（E5）** —— `os_agent/metrics.py` 是零依赖、线程安全的指标核心：计数器、直方图（独立延迟桶 `LATENCY_BUCKETS_MS`）、缓存命中/未命中统计。`DesktopAgent` 持有按 agent 隔离的 `MetricsRegistry`（多节点机队按 agent 隔离计数，而非共享单例）。`Reasoner.decide` 记录 fast-accept / 升级计数与 `decide_latency_ms`；`_act`/`_act_raw` 记录每动作 total/ok/fail 计数与延迟。`metrics_snapshot()` 一次导出完整视图（计数器+直方图+打码总数+vlm 缓存统计）为 JSON-safe dict，供外部 Prometheus exporter 或 fusion-core monitor 抓取。
+- **审计日志聚合（缺口 4）** —— `os_agent/audit_log.py` 是结构化 append-only JSONL 审计轨迹：每次 `decide`/`action`/`assert`/`heal`/`replay` 记录 `AuditEntry`（ts、agent_id、kind、detail）。线程安全；坏路径 fail-open（禁用持久化，保留内存缓冲）。`OSA_AUDIT_PATH` 选 JSONL 文件；空（默认）= 仅内存，离线测试无副作用。`query(kind, since)`/`count()` 支持聚合。
+- **熔断 + 限流（缺口 3）** —— `os_agent/circuit_breaker.py` 守护每次 `chat_vision`。连续失败达 `breaker_failure_threshold` 或滑动窗口 `breaker_window_s` 内失败率超 `breaker_failure_rate`（最少 `breaker_min_calls_for_rate` 次调用）即开路，`breaker_cooldown_s` 内快速失败抛 `CircuitOpenError`，随后半开探测。全部旋钮可环境变量调（`OSA_BREAKER_*`）。mlx 集群宕机不再每个并发槽位钉满超时。
+- **幂等回放事务（缺口 5）** —— `os_agent/replay_ledger.py` 按幂等键将已完成步骤序列持久化到 JSONL 账本。`replay(script, idempotency_key=...)` 跳过已标记完成的步骤，崩溃回放**恢复**而非重复执行变更步骤（无双击/双输/重复提交）。`ReplayLedger` 幂等（对已完成 seq 的 `mark_done` 为空操作），按键隔离进度。不传键则原非幂等行为（向后兼容）。
+- **多节点编排（缺口 2）** —— `os_agent/coordination.py` 为共享同一 mlx 集群的 N 个 osagent 节点提供本地优先协调面（无 Redis/etcd——单机 Apple Silicon 机队）：`NodeRegistry` 向 flock 保护的 `nodes.json` 注册/心跳/注销，超 `heartbeat_ttl_s` 的僵尸节点被回收；`ClusterHealth` 跨所有节点聚合 mlx 失败为共享信号，任一节点在**集群**病态时即开路自身熔断，而非仅自身达标才开（4 节点 × 各 5 次自有失败不再 = 集群 20 次命中才有任一开路）。`DesktopAgent` 打 `mlx.node_id`，构造时注册，每周期心跳，`close()` 时注销。`OSA_AGENT_ID` 命名节点；`OSA_CLUSTER_DIR` 重定位状态目录。stub 模式跳过集群接线。
+
+五项缺口的回归测试在 `tests/test_audit0905.py`（指标快照、线程安全注册表、直方图分桶、审计持久化+fail-open、熔断 开路/半开/按速率、幂等回放无双击、账本持久化+键隔离、节点注册表 注册/注销/僵尸回收、集群聚合失败开路、成功裁剪、文件锁可重入）。
+
 ## 上游依赖
 
 硬阻塞缺口以 issue 上报（不在本仓内补同源仓）：

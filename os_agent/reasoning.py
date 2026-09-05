@@ -10,6 +10,7 @@ model judging the first. Fast success never calls Slow (saves compute).
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 
 from fusion_core import get_logger
@@ -17,6 +18,7 @@ from fusion_core import get_logger
 from os_agent.adapters.base import Screenshot
 from os_agent.config import OsaConfig
 from os_agent.mask import SensitiveMasker
+from os_agent.metrics import MetricsRegistry, get_registry
 from os_agent.vlm_cache import VlmCache
 
 log = get_logger("os_agent.reasoning")
@@ -48,7 +50,7 @@ class FastProposal:
 class Reasoner:
     """Fast/Slow dual-core scheduler."""
 
-    def __init__(self, cfg: OsaConfig, mlx, som, masker: SensitiveMasker | None = None) -> None:
+    def __init__(self, cfg: OsaConfig, mlx, som, masker: SensitiveMasker | None = None, metrics: MetricsRegistry | None = None) -> None:
         self.cfg = cfg
         self.mlx = mlx
         self.som = som
@@ -58,22 +60,31 @@ class Reasoner:
         self.masker = masker if masker is not None else SensitiveMasker()
         self.fast_confidence_floor = cfg.fast_confidence_floor
         self.vlm_cache = VlmCache(ttl=cfg.vlm_cache_ttl)  # P5/B4: skip re-infer on identical input
+        # E5: metrics registry — counters for fast/slow/escalation, histogram
+        # for decide latency, cache hit/miss export. Defaults to the module
+        # singleton; DesktopAgent passes its own for per-agent isolation.
+        self.metrics = metrics if metrics is not None else get_registry()
 
     async def _chat_json_cached(self, prompt: str, image_b64: str, model: str) -> dict | None:
         """P5/B4: short-circuit VLM inference when (model, prompt, image) is identical within TTL."""
         cached, hit = self.vlm_cache.get(model, prompt, image_b64)
         if hit:
+            self.metrics.cache_hit("vlm")
             return cached
+        self.metrics.cache_miss("vlm")
         data = await self.mlx.chat_json(prompt, image_b64, model=model)
         self.vlm_cache.put(model, prompt, image_b64, data)
         return data
 
     async def decide(self, query: str, shot: Screenshot, history: list[dict] | None = None) -> Reason:
         history = history or []
+        t0 = time.monotonic()
         proposal = await self._fast_propose(query, shot)
         escalate, reason = self._should_escalate(proposal, history)
         if not escalate:
             log.info("fast accept: action=%s conf=%.2f query=%r", proposal.action, proposal.confidence, query)
+            self.metrics.inc("reasoning.fast_accept")
+            self.metrics.observe("reasoning.decide_latency_ms", (time.monotonic() - t0) * 1000.0)
             return Reason(
                 action=proposal.action,
                 target=proposal.target,
@@ -82,7 +93,10 @@ class Reasoner:
                 rationale="fast single-shot",
             )
         log.warning("escalate to slow: %s query=%r", reason, query)
-        return await self._slow_plan(query, shot, history)
+        self.metrics.inc("reasoning.escalations")
+        reason_out = await self._slow_plan(query, shot, history)
+        self.metrics.observe("reasoning.decide_latency_ms", (time.monotonic() - t0) * 1000.0)
+        return reason_out
 
     async def _fast_propose(self, query: str, shot: Screenshot) -> FastProposal:
         # N5: on a no-AX screen the fail-closed masker blurs the whole frame, so
