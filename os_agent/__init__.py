@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-__version__ = "0.1.0"
+__version__ = "1.1.0rc1"
 
 from os_agent.api import DesktopAgent
 from os_agent.config import OsaConfig
