@@ -12,6 +12,7 @@ import os
 from dataclasses import dataclass, field
 
 from fusion_core import get_logger
+from fusion_core.config import client_key
 
 log = get_logger("os_agent.config")
 
@@ -45,28 +46,10 @@ def _env_bool(key: str, default: bool) -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
-def _resolve_mlx_api_key() -> str:
-    raw = os.environ.get("FUSION_MLX_API_KEY")
-    if raw:
-        return raw
-    settings = os.path.join(os.path.expanduser("~"), ".fusion-mlx", "settings.json")
-    try:
-        import json
-
-        with open(settings) as fh:
-            d = json.load(fh)
-        key = d.get("auth", {}).get("api_key", "")
-        if key:
-            return key
-    except Exception:
-        pass
-    return ""
-
-
 @dataclass
 class OsaConfig:
     fusion_mlx_url: str = field(default_factory=lambda: os.environ.get("FUSION_MLX_URL", "http://localhost:11434/v1"))
-    fusion_mlx_api_key: str = field(default_factory=_resolve_mlx_api_key)
+    fusion_mlx_api_key: str = field(default_factory=client_key)  # single-point: fusion_core.config (issue #5)
     fast_model: str = field(
         default_factory=lambda: os.environ.get("OSA_FAST_MODEL", "mlx-community/Qwen2.5-VL-7B-Instruct-4bit")
     )

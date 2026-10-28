@@ -463,6 +463,16 @@ The four ops-grade gaps from the six-dimension review are now closed:
 
 All four are covered by regression tests in `tests/test_audit0905.py`.
 
+## Config governance (issue #5)
+
+API-key resolution no longer lives in this repo. `OsaConfig.fusion_mlx_api_key`
+is now a one-line delegation to `fusion_core.config.client_key()` (config
+Phase 2.2, `architecture/config-conventions.md`): alias chain
+`FUSION_CLIENT_KEY` → `FUSION_MLX_API_KEY` → `MLX_API_KEY`; dev missing key =
+`""` + warning; `FUSION_PROFILE=prod` missing key = `RuntimeError`. The local
+`_resolve_mlx_api_key` (env + `~/.fusion-mlx/settings.json` fallback) is
+deleted — `scripts/check-env.py` reports 0 findings for this repo.
+
 ## Upstream dependencies
 
 Hard-blocking gaps filed as issues (do not patch sibling repos here):

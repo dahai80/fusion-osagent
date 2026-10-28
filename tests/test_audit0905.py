@@ -837,3 +837,28 @@ async def test_replay_recording_claim_skips_concurrent_duplicate(tmp_path):
     r2 = await rep.replay_recording(rec, idempotency_key="k1", ledger_path=ledger_path)
     assert r2.passed == 1
     assert len(agent.executor.calls) == 1, "concurrent replay must not double-execute (claim skipped)"
+
+
+# issue #5: api key resolution lives in fusion_core.config only (single-point).
+def test_osaconfig_uses_fusion_client_key(monkeypatch):
+    monkeypatch.setenv("FUSION_CLIENT_KEY", "ck-test-123")
+    monkeypatch.delenv("FUSION_MLX_API_KEY", raising=False)
+    monkeypatch.delenv("MLX_API_KEY", raising=False)
+    assert OsaConfig().fusion_mlx_api_key == "ck-test-123"
+
+
+def test_osaconfig_client_key_empty_in_dev(monkeypatch):
+    monkeypatch.delenv("FUSION_CLIENT_KEY", raising=False)
+    monkeypatch.delenv("FUSION_MLX_API_KEY", raising=False)
+    monkeypatch.delenv("MLX_API_KEY", raising=False)
+    monkeypatch.delenv("FUSION_PROFILE", raising=False)
+    assert OsaConfig().fusion_mlx_api_key == ""
+
+
+def test_osaconfig_client_key_fail_fast_in_prod(monkeypatch):
+    monkeypatch.delenv("FUSION_CLIENT_KEY", raising=False)
+    monkeypatch.delenv("FUSION_MLX_API_KEY", raising=False)
+    monkeypatch.delenv("MLX_API_KEY", raising=False)
+    monkeypatch.setenv("FUSION_PROFILE", "prod")
+    with pytest.raises(RuntimeError, match="FUSION_CLIENT_KEY not set"):
+        OsaConfig()

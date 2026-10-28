@@ -250,6 +250,16 @@ D14（真实端到端跑通）受环境门控：7 个集成测试在 `OSA_RUN_IN
 
 四项均由 `tests/test_audit0905.py` 回归测试覆盖。
 
+## 配置治理（issue #5）
+
+API key 解析不再落在本仓。`OsaConfig.fusion_mlx_api_key` 改为一行委托
+`fusion_core.config.client_key()`（配置治理 Phase 2.2，权威规范
+`architecture/config-conventions.md`）：别名链 `FUSION_CLIENT_KEY` →
+`FUSION_MLX_API_KEY` → `MLX_API_KEY`；dev 缺 key 返回 `""` + 警告；
+`FUSION_PROFILE=prod` 缺 key 直接 `RuntimeError`。本地
+`_resolve_mlx_api_key`（env + `~/.fusion-mlx/settings.json` 兜底）已删除，
+`scripts/check-env.py` 对本仓 0 违规。
+
 ## 上游依赖
 
 硬阻塞缺口以 issue 上报（不在本仓内补同源仓）：

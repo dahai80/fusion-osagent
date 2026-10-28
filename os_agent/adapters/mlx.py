@@ -1,7 +1,7 @@
 """fusion-mlx adapter: local VLM inference via fusion-core.FusionMLXClient.
 
 Endpoint http://localhost:11434 (OpenAI-compatible). The api key is resolved
-from FUSION_MLX_API_KEY or ~/.fusion-mlx/settings.json (never hardcoded here).
+by fusion_core.config.client_key (FUSION_CLIENT_KEY, single-point, never hardcoded here).
 Fast/Slow dual-core model selection lives in reasoning.py; this adapter is a
 thin inference wrapper returning raw text/JSON for a given image+prompt.
 
