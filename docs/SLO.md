@@ -15,7 +15,7 @@ bound to localhost.
 
 - **Tier**: internal platform (controlled enterprise production).
 - **Surface**: Python library `DesktopAgent` + `fusion-osagent` CLI + Prometheus
-  scrape endpoint on `127.0.0.1:9100/metrics`.
+  scrape endpoint on `127.0.0.1:11571/metrics`.
 - **Dependencies**: fusion-mlx (local VL inference, `localhost:11434`),
   fusion-executor (UDS), fusion-browser (UDS), macOS Accessibility + Screen
   Recording TCC grants.
@@ -86,7 +86,7 @@ running one agent, coordinated by the fleet registry (`cluster nodes`).
 
 ## 5. Alerting recommendations (Prometheus)
 
-Scrape `fusion-osagent serve-metrics --port 9100`. Alert on:
+Scrape `fusion-osagent serve-metrics --port 11571`. Alert on:
 
 - `osagent_breaker_state == 1` for > 1m → mlx backend degraded; page ops.
 - `rate(osagent_action_click_total - osagent_action_click_ok[5m]) / rate(osagent_action_click_total[5m]) > 0.05` → step failure rate over 5%.

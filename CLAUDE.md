@@ -33,7 +33,7 @@ fusion-osagent health                        # ping mlx + executor + browser
 fusion-osagent metrics                       # metrics snapshot as JSON
 fusion-osagent audit query [--kind K] [--since T]
 fusion-osagent cluster nodes|health          # fleet coordination state
-fusion-osagent serve-metrics --port 9100     # Prometheus scrape endpoint (GET /metrics)
+fusion-osagent serve-metrics --port 11571    # Prometheus scrape endpoint (GET /metrics)
 ```
 
 ## Architecture
@@ -80,4 +80,4 @@ All knobs are env-driven `OSA_*` vars consumed by `OsaConfig` (`os_agent/config.
 - LLM/VLM HTTP goes through fusion-core clients (`get_async_client`, `FusionMLXClient`); JSON parsing uses the shared `_extract_json`-style fenced-block preference (chatty model output must not break it).
 - README.md documents each hardening/feature pass — update it (and README_CN.md) when adding a feature.
 - Cross-repo issues: see AGENTS.md — allowed to file against any `dahai80/fusion-*` repo, must document source repo, dependency contract, and blocking relationship, and comment back on the parent issue.
-- Ports/process titles: osagent binds no business port, but `serve-metrics` defaults to `127.0.0.1:9100`; any new port must be registered in `architecture/port-registry.yaml` and long-running processes must set a `fusion-osagent ...` proctitle.
+- Ports/process titles: osagent binds one registered port — `serve-metrics` defaults to `127.0.0.1:11571` (9100 is reserved for fusion-supervisor); any new port must be registered in `architecture/port-registry.yaml` and long-running processes must set a `fusion-osagent ...` proctitle.

@@ -3,7 +3,7 @@
 metrics_snapshot() returns a plain dict; Prometheus scrapes the text-based
 exposition format over HTTP. This module converts a snapshot dict into the
 Prometheus 0.0.4 text format so an external prometheus.yml can scrape
-`fusion-osagent serve-metrics --port 9100` without a prometheus_client
+`fusion-osagent serve-metrics --port 11571` without a prometheus_client
 dependency (local-first, zero-dep).
 
 Format rules (https://prometheus.io/docs/instrumenting/exposition_formats/):
@@ -138,7 +138,7 @@ def render_prometheus(snapshot: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-async def serve_metrics(agent, host: str = "127.0.0.1", port: int = 9100) -> None:
+async def serve_metrics(agent, host: str = "127.0.0.1", port: int = 11571) -> None:
     """Run a minimal HTTP server exposing /metrics in Prometheus text format.
 
     Single endpoint: GET /metrics -> render_prometheus(agent.metrics_snapshot()).

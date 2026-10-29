@@ -862,3 +862,12 @@ def test_osaconfig_client_key_fail_fast_in_prod(monkeypatch):
     monkeypatch.setenv("FUSION_PROFILE", "prod")
     with pytest.raises(RuntimeError, match="FUSION_CLIENT_KEY not set"):
         OsaConfig()
+
+
+# issue #6: serve-metrics default port must NOT be 9100 (fusion-supervisor HTTP face).
+def test_serve_metrics_default_port_not_supervisor_port():
+    import inspect
+
+    from os_agent.prometheus import serve_metrics
+
+    assert inspect.signature(serve_metrics).parameters["port"].default == 11571

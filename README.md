@@ -441,7 +441,8 @@ The four ops-grade gaps from the six-dimension review are now closed:
   `metrics_snapshot()` into Prometheus 0.0.4 text format (counters, histograms
   with `_bucket`/`_sum`/`_count`, cache gauges, breaker/cluster state gauges).
   Zero-dependency stdlib HTTP server. CLI: `fusion-osagent serve-metrics
-  --host 127.0.0.1 --port 9100` exposes `GET /metrics`. Metric names sanitized
+  --host 127.0.0.1 --port 11571` exposes `GET /metrics` (issue#6: 9100
+  reserved for fusion-supervisor). Metric names sanitized
   (`.`/`-` → `_`) to the `[a-zA-Z_:][a-zA-Z0-9_:]*` grammar.
 - **GA-2 audit log rotation + retention** — `AuditLog` now rotates the active
   JSONL to a `.{timestamp}` archive when it exceeds `rotate_max_bytes`, then
