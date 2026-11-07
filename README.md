@@ -1,3 +1,19 @@
+---
+doc_id: fusion-osagent/readme
+product: fusion-osagent
+class: app
+entry: developer
+doc_type: readme
+title: { zh: "fusion-osagent 自述文件", en: "fusion-osagent readme" }
+audience: engineer
+status: draft
+version: 1.1.0rc3
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - README.md
+---
+
 # fusion-osagent
 
 > Desktop Embodied AI — pixel-level OS Agent barrier layer for Apple Silicon.
