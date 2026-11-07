@@ -1,3 +1,19 @@
+---
+doc_id: fusion-osagent/readme-cn
+product: fusion-osagent
+class: app
+entry: developer
+doc_type: readme
+title: { zh: "fusion-osagent 中文自述", en: "fusion-osagent readme (Chinese)" }
+audience: engineer
+status: draft
+version: 1.1.0rc3
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - README_CN.md
+---
+
 # fusion-osagent
 
 > 桌面具身智能 —— Apple Silicon 上的像素级 OS Agent 壁垒层。

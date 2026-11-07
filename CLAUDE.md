@@ -1,3 +1,19 @@
+---
+doc_id: fusion-osagent/claude-guide
+product: fusion-osagent
+class: app
+entry: developer
+doc_type: guide
+title: { zh: "fusion-osagent Claude 工作指南", en: "fusion-osagent CLAUDE guide" }
+audience: engineer
+status: draft
+version: 1.1.0rc3
+updated: 2026-11-07
+owner: @dahai
+source_of_truth:
+  - CLAUDE.md
+---
+
 # CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
