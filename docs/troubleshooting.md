@@ -9,7 +9,7 @@ audience: engineer
 status: draft
 version: 1.1.0rc3
 updated: 2026-11-07
-owner: @dahai
+owner: "@dahai"
 source_of_truth:
   - README.md
   - os_agent/cli.py
