@@ -107,6 +107,12 @@ class OsaConfig:
     audit_rotate_max_bytes: int = field(default_factory=lambda: _env_int("OSA_AUDIT_ROTATE_MAX_BYTES", 50_000_000))
     audit_retention_files: int = field(default_factory=lambda: _env_int("OSA_AUDIT_RETENTION_FILES", 10))
     audit_retention_days: int = field(default_factory=lambda: _env_int("OSA_AUDIT_RETENTION_DAYS", 30))
+    # Issue #9: sandbox execution backend. "host" = physical host via
+    # fusion-executor (full capability). "vm" = disposable macOS guest via the
+    # fusion-autotest VM fleet (issue #37): guest-helper capture/input, host
+    # pointer/clipboard never touched, no host AX tree (visual track only).
+    sandbox_mode: str = field(default_factory=lambda: os.environ.get("OSA_SANDBOX_MODE", "host"))
+    vm_name: str = field(default_factory=lambda: os.environ.get("OSA_VM_NAME", "golden"))
 
     def __post_init__(self) -> None:
         # P1 fix: clamp/validate env-driven knobs so a misconfigured negative
@@ -160,6 +166,14 @@ class OsaConfig:
         if c.scale_factor <= 0:
             log.warning("scale_factor=%s clamped to 2.0", c.scale_factor)
             c.scale_factor = 2.0
+        # Issue #9: sandbox_mode must be a known backend; a typo would silently
+        # fall through to an unconstructed adapter.
+        if c.sandbox_mode not in ("host", "vm"):
+            log.warning("sandbox_mode=%r unknown, falling back to 'host'", c.sandbox_mode)
+            c.sandbox_mode = "host"
+        if not c.vm_name:
+            log.warning("vm_name empty, falling back to 'golden'")
+            c.vm_name = "golden"
 
 
 def points_to_pixels(x: float, y: float, scale: float) -> tuple[float, float]:

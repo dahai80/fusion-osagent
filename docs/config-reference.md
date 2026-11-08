@@ -57,6 +57,12 @@ source_of_truth:
 | `OSA_AGENT_ID` | 集群内节点名 |
 | `OSA_CLUSTER_DIR` | 集群状态目录重定位；stub 模式跳过集群接线 |
 | `OSA_BREAKER_*` | MLX 熔断器旋钮（半开探测等，全部 env 可调）；DOWN 状态的 mlx 由熔断器短路 |
+| `OSA_SANDBOX_MODE` | `host`（默认，全能力）或 `vm`（隔离沙箱：一次性 guest，宿主指针/剪贴板不暴露；仅视觉轨道、无宿主 app、仅纵向滚动；issue #9） |
+| `OSA_VM_NAME` | vm 模式使用的 guest 名（fleet 内，默认 `golden`） |
+
+### 沙箱策略（issue #9）
+
+`os_agent.sandbox.recommended_sandbox_mode(task_text)` 按规则分类任务文本：命中凭据/密钥/登录/剪贴板/支付等信号 → 建议 `vm`；否则 `host`。该建议作为默认模式，显式 `OSA_SANDBOX_MODE` 覆盖之。
 
 ## 端口
 
@@ -64,5 +70,7 @@ source_of_truth:
 |------|------|
 | 11571 | `serve-metrics` HTTP `/metrics`（默认；issue #6 由 9100 迁移） |
 | 11434 | fusion-mlx 推理（上游） |
+
+vm 模式不经端口：执行委托给 fusion-autotest VM fleet 的 guest 邮箱协议（进程内）。
 
 端口登记见工作区 `architecture/port-registry.yaml`。

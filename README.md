@@ -480,6 +480,25 @@ The four ops-grade gaps from the six-dimension review are now closed:
 
 All four are covered by regression tests in `tests/test_audit0905.py`.
 
+## Sandbox execution backend (issue #9)
+
+`OSA_SANDBOX_MODE=host` (default, full capability) vs `OSA_SANDBOX_MODE=vm`
+(untrusted tasks). vm mode delegates actuation to a disposable macOS guest via
+the fusion-autotest VM fleet (issue #37, terminal-mac pattern): the in-guest
+helper captures the screen and posts input, so the host pointer, clipboard,
+and signed-in sessions are never exposed to the agent.
+
+- Policy hook: `os_agent.sandbox.recommended_sandbox_mode(task_text)` is a
+  rule-based classifier — credential / secret / login / clipboard / payment
+  signals recommend `vm` as the default mode; explicit `OSA_SANDBOX_MODE`
+  overrides. Code-decided, no model in the loop.
+- Capability ceiling (honest): no guest AX tree (visual track only), no host
+  apps (`focus_app` refused), vertical scroll only, no human-like cursor path
+  (guest has no observer). Guest coordinates are points (`scale_factor=1.0`).
+- Requires a provisioned guest: `OSA_VM_NAME` (default `golden`), provisioned
+  with fusion-autotest `scripts/vm_spike.py` (one-time guided golden prep for
+  setup-assistant/auto-login/TCC — documented upstream gap).
+
 ## Config governance (issue #5)
 
 API-key resolution no longer lives in this repo. `OsaConfig.fusion_mlx_api_key`

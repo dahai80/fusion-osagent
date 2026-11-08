@@ -265,7 +265,12 @@ def main() -> None:
     p_cluster_sub.add_parser("health", help="cluster-level mlx health")
     p_serve = sub.add_parser("serve-metrics", help="run a Prometheus scrape endpoint (/metrics)")
     p_serve.add_argument("--host", default="127.0.0.1", help="bind host (default localhost)")
-    p_serve.add_argument("--port", type=int, default=11571, help="bind port (default 11571, issue#6: 9100 reserved for fusion-supervisor)")
+    p_serve.add_argument(
+        "--port",
+        type=int,
+        default=11571,
+        help="bind port (default 11571, issue#6: 9100 reserved for fusion-supervisor)",
+    )
     args = ap.parse_args()
 
     if args.cmd == "preflight":

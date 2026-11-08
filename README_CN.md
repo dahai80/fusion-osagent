@@ -266,6 +266,19 @@ D14（真实端到端跑通）受环境门控：7 个集成测试在 `OSA_RUN_IN
 
 四项均由 `tests/test_audit0905.py` 回归测试覆盖。
 
+## 沙箱执行后端（issue #9）
+
+`OSA_SANDBOX_MODE=host`（默认，全能力）vs `OSA_SANDBOX_MODE=vm`（不可信任务）。
+vm 模式把执行委托给 fusion-autotest VM fleet（issue #37，terminal-mac 模式）的一次性
+macOS guest：guest 内助手负责截屏与输入，宿主指针、剪贴板、已登录会话对 agent 不可见。
+
+- 策略钩子：`os_agent.sandbox.recommended_sandbox_mode(task_text)` 规则分类器——
+  凭据/密钥/登录/剪贴板/支付信号建议默认 `vm`；显式 `OSA_SANDBOX_MODE` 覆盖。代码决策，不经模型。
+- 能力上限（如实声明）：guest 无 AX 树（仅视觉轨道）、无宿主 app（`focus_app` 拒绝）、
+  仅纵向滚动、无拟人光标路径（guest 无观察者）。guest 坐标即逻辑点（`scale_factor=1.0`）。
+- 需已供给的 guest：`OSA_VM_NAME`（默认 `golden`），用 fusion-autotest `scripts/vm_spike.py`
+  供给（一次性 guided golden prep：设置助手/自动登录/TCC——已记录的上游缺口）。
+
 ## 配置治理（issue #5）
 
 API key 解析不再落在本仓。`OsaConfig.fusion_mlx_api_key` 改为一行委托

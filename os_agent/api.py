@@ -76,9 +76,20 @@ class DesktopAgent:
         from os_agent import image_cache
 
         image_cache.configure(self.cfg.image_cache_max_entries)
-        self.executor: ExecutorAdapter | StubExecutorAdapter = (
-            StubExecutorAdapter(self.cfg) if self.cfg.stub_mode else ExecutorAdapter(self.cfg)
-        )
+        # Issue #9: sandbox execution backend. mode=vm swaps the executor for
+        # the fusion-autotest VM-fleet adapter (disposable guest, host pointer/
+        # clipboard untouched, visual track only — no guest AX tree).
+        if self.cfg.sandbox_mode == "vm":
+            from os_agent.adapters.vm_executor import StubVmExecutorAdapter, VmExecutorAdapter
+
+            if self.cfg.stub_mode:
+                self.executor = StubVmExecutorAdapter(self.cfg)
+                log.info("sandbox_mode=vm (stub): stub vm executor")
+            else:
+                self.executor = VmExecutorAdapter(self.cfg)
+                log.info("sandbox_mode=vm: executor delegated to VM fleet guest %r", self.cfg.vm_name)
+        else:
+            self.executor = StubExecutorAdapter(self.cfg) if self.cfg.stub_mode else ExecutorAdapter(self.cfg)
         self.mlx: MlxAdapter | StubMlxAdapter = StubMlxAdapter(self.cfg) if self.cfg.stub_mode else MlxAdapter(self.cfg)
         # Gap 2: multi-node coordination. Stamp this agent's node_id onto mlx
         # (so cluster-health failures are attributed to the right node) and

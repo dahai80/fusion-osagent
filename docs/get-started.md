@@ -73,13 +73,15 @@ asyncio.run(main())
 from os_agent.recorder import ManualEventSource, Recorder
 
 agent = DesktopAgent(OsaConfig(stub_mode=True))
-src = ManualEventSource([
-    {"kind": "click", "at": [100.0, 200.0], "button": "left"},
-    {"kind": "type", "text": "hello"},
-])
+src = ManualEventSource(
+    [
+        {"kind": "click", "at": [100.0, 200.0], "button": "left"},
+        {"kind": "type", "text": "hello"},
+    ]
+)
 rec = Recorder(src, capture=lambda: None, clock=lambda: 0.0).record()
-script = agent.translator.translate(rec)   # generalize fixed coords
-report = await agent.replay(script)        # per-step frame assertion
+script = agent.translator.translate(rec)  # generalize fixed coords
+report = await agent.replay(script)  # per-step frame assertion
 await agent.close()
 ```
 
