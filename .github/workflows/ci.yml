@@ -44,17 +44,11 @@ jobs:
             uv-${{ runner.os }}-py3.12-
 
       - name: Create venv and install package
-        env:
-          FUSION_CORE_TOKEN: ${{ secrets.FUSION_CORE_TOKEN }}
         run: |
           python3.12 -m venv .venv
           source .venv/bin/activate
-          if [ -n "$FUSION_CORE_TOKEN" ]; then
-            uv pip install "git+https://x-access-token:${FUSION_CORE_TOKEN}@github.com/dahai80/fusion-core.git"
-          else
-            echo "::error::FUSION_CORE_TOKEN secret is not set — needed to clone private dahai80/fusion-core (same pattern as fusion-autotest CI, see its issue #54)."
-            exit 1
-          fi
+          # fusion-core is public — install straight from git, no token needed.
+          uv pip install "git+https://github.com/dahai80/fusion-core.git"
           uv pip install -e ".[test]"
           uv pip install ruff
 
