@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Cache uv packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/uv
+          key: uv-${{ runner.os }}-py3.12-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            uv-${{ runner.os }}-py3.12-
+
+      - name: Create venv and install package
+        run: |
+          python3.12 -m venv .venv
+          source .venv/bin/activate
+          # fusion-core is public — install straight from git, no token needed.
+          uv pip install "git+https://github.com/dahai80/fusion-core.git"
+          uv pip install -e ".[test]"
+          uv pip install ruff
+
+      - name: Ruff lint gate
+        run: |
+          source .venv/bin/activate
+          ruff check . --output-format=github
+
+      - name: Pytest unit gate
+        run: |
+          source .venv/bin/activate
+          python -m pytest tests/ -q --no-header
+
+      - name: Upload pytest logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-output
+          path: .pytest_cache/
+          retention-days: 7

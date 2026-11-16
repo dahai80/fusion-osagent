@@ -495,8 +495,13 @@ def test_circuit_breaker_half_open_then_close_on_success():
     cb.on_failure()
     cb.on_failure()
     assert cb.state == "open"
-    # force cooldown-elapsed so the next state query flips to half_open
-    cb._opened_at = 0.0
+    # force cooldown-elapsed so the next state query flips to half_open.
+    # Backdate relative to monotonic(): a fresh CI runner can have uptime
+    # under the cooldown, so an absolute 0.0 anchor is not guaranteed to be
+    # cooldown-elapsed there.
+    import time as _time
+
+    cb._opened_at = _time.monotonic() - 61.0
     assert cb.state == "half_open"
     cb.on_success()
     assert cb.state == "closed"
