@@ -7,8 +7,8 @@ doc_type: changelog
 title: { zh: "fusion-osagent 变更日志", en: "fusion-osagent changelog" }
 audience: engineer
 status: draft
-version: 1.1.0rc3
-updated: 2026-11-07
+version: 1.1.0
+updated: 2026-11-26
 owner: "@dahai"
 source_of_truth:
   - CHANGELOG.md
@@ -29,6 +29,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Add docs-contract frontmatter to `README.md`, `README_CN.md`, `AGENTS.md`, `CLAUDE.md`, `docs/SLO.md`.
+
+## [1.1.0] - 2026-11-26
+
+### Changed
+
+- Promote the release version from `1.1.0rc6` to `1.1.0` after a long-parked release-candidate stage (issue #12).
+- Align the `os_agent.__version__` package constant, which had drifted to `1.1.0rc1`, with the release version.
 
 ## [1.1.0rc3] - 2026-10-29
 
