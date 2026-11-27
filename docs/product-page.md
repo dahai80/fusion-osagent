@@ -7,7 +7,7 @@ doc_type: product-page
 title: { zh: "fusion-osagent 产品页", en: "fusion-osagent product page" }
 audience: engineer
 status: draft
-version: 1.1.0rc3
+version: 1.1.0
 updated: 2026-11-07
 owner: "@dahai"
 source_of_truth:

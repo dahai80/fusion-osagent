@@ -7,7 +7,7 @@ doc_type: troubleshooting
 title: { zh: "fusion-osagent 故障排查", en: "fusion-osagent troubleshooting" }
 audience: engineer
 status: draft
-version: 1.1.0rc3
+version: 1.1.0
 updated: 2026-11-07
 owner: "@dahai"
 source_of_truth:

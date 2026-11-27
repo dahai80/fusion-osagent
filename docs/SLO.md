@@ -7,7 +7,7 @@ doc_type: guide
 title: { zh: "fusion-osagent SLO 定义", en: "fusion-osagent SLO definitions" }
 audience: engineer
 status: draft
-version: 1.1.0rc3
+version: 1.1.0
 updated: 2026-11-07
 owner: "@dahai"
 source_of_truth:

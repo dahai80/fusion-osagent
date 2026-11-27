@@ -7,7 +7,7 @@ doc_type: readme
 title: { zh: "fusion-osagent 中文自述", en: "fusion-osagent readme (Chinese)" }
 audience: engineer
 status: draft
-version: 1.1.0rc3
+version: 1.1.0
 updated: 2026-11-07
 owner: "@dahai"
 source_of_truth:

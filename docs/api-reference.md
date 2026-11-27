@@ -7,7 +7,7 @@ doc_type: api-reference
 title: { zh: "fusion-osagent API 参考", en: "fusion-osagent API reference" }
 audience: engineer
 status: draft
-version: 1.1.0rc3
+version: 1.1.0
 updated: 2026-11-07
 owner: "@dahai"
 source_of_truth:
